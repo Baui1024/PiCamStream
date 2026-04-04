@@ -1,0 +1,13 @@
+[project]
+name = "picam-stream"
+version = "0.1.0"
+description = "Raspberry Pi camera streaming client with TLS support"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "picamera2>=0.3.19",
+    "loguru>=0.7.3",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.8",
+    "websockets>=12.0",
+]

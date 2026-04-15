@@ -25,7 +25,6 @@ from .config import (
     TLS_REQUIRE_CLIENT_CERT,
     TLS_CA_FILE,
     CAMERA_FPS,
-    ENCODE_FORMAT,
 )
 
 
@@ -133,8 +132,7 @@ class StreamServer:
                     pass
                 logger.warning(f"Client disconnected (dropped). Active: {len(self._clients)}")
 
-            if ENCODE_FORMAT != "h264":
-                await asyncio.sleep(frame_interval)
+            await asyncio.sleep(frame_interval)
 
     # --- internal -----------------------------------------------------------
 
@@ -150,18 +148,6 @@ class StreamServer:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             # Limit send buffer to ~2 frames worth to prevent latency buildup
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
-
-        # For H.264, send latest keyframe so client can begin decoding
-        if ENCODE_FORMAT == "h264":
-            keyframe = self._camera.get_latest_keyframe()
-            if keyframe:
-                header = struct.pack(">I", len(keyframe))
-                try:
-                    writer.write(header + keyframe)
-                    await writer.drain()
-                except Exception:
-                    writer.close()
-                    return
 
         self._clients.add(writer)
 

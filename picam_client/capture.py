@@ -26,9 +26,6 @@ from .config import (
     CAMERA_AE_ENABLE,
     CAMERA_EXPOSURE_TIME,
     CAMERA_ANALOGUE_GAIN,
-    ENCODE_FORMAT,
-    H264_BITRATE,
-    H264_KEYFRAME_PERIOD,
     V4L2_DEVICE,
     V4L2_FORMAT,
     V4L2_I2C_SCRIPT,
@@ -36,36 +33,27 @@ from .config import (
 
 
 class FrameBuffer:
-    """Thread-safe single-frame buffer for encoded output (JPEG or H.264)."""
+    """Thread-safe single-frame buffer for encoded JPEG output."""
 
     def __init__(self):
         self.frame: Optional[bytes] = None
-        self._latest_keyframe: Optional[bytes] = None
-        self._frame_id: int = 0  # Incremented on each new frame
+        self._frame_id: int = 0
         self.condition = threading.Condition()
 
-    def update(self, data: bytes, keyframe: bool = True) -> None:
+    def update(self, data: bytes) -> None:
         with self.condition:
             self.frame = data
             self._frame_id += 1
-            if keyframe:
-                self._latest_keyframe = data
             self.condition.notify_all()
 
     def wait_for_frame(self, timeout: float = 2.0) -> Optional[bytes]:
         """Block until a NEW frame is available (skips stale frames)."""
         with self.condition:
-            # Capture current ID and wait for it to change
             seen_id = self._frame_id
             while self._frame_id == seen_id:
                 if not self.condition.wait(timeout=timeout):
-                    return None  # Timeout
+                    return None
             return self.frame
-
-    def get_latest_keyframe(self) -> Optional[bytes]:
-        """Get latest keyframe (H.264) or latest frame (JPEG)."""
-        with self.condition:
-            return self._latest_keyframe
 
 
 # =============================================================================
@@ -182,8 +170,6 @@ class PicamBackend(CameraBackend):
         super().__init__(buffer)
         self._picam = None
         self._capture_thread: Optional[threading.Thread] = None
-        self._encoder = None
-        self._h264_output = None
 
     def start(self) -> None:
         """Initialize picamera2 and begin capturing."""
@@ -192,59 +178,25 @@ class PicamBackend(CameraBackend):
         self._picam = Picamera2()
         width, height = CAMERA_RESOLUTION
 
-        if ENCODE_FORMAT == "h264":
-            from picamera2.encoders import H264Encoder
-            from picamera2.outputs import Output as _PicamOutput
+        config = self._picam.create_video_configuration(
+            main={"size": CAMERA_RESOLUTION, "format": "RGB888"},
+            transform=self._build_transform(),
+        )
+        self._picam.configure(config)
+        self._picam.start()
+        self._apply_exposure_settings()
 
-            class H264Output(_PicamOutput):
-                """Feeds H.264 access units into a FrameBuffer."""
+        self._running = True
+        self._capture_thread = threading.Thread(
+            target=self._capture_loop, daemon=True
+        )
+        self._capture_thread.start()
 
-                def __init__(inner_self, buffer: FrameBuffer):
-                    super().__init__()
-                    inner_self._buffer = buffer
-
-                def outputframe(inner_self, frame, keyframe=False, timestamp=None, packet=None, audio=None):
-                    inner_self._buffer.update(bytes(frame), keyframe=keyframe)
-
-            config = self._picam.create_video_configuration(
-                main={"size": CAMERA_RESOLUTION},
-                transform=self._build_transform(),
-            )
-            self._picam.configure(config)
-
-            self._encoder = H264Encoder(
-                bitrate=H264_BITRATE,
-                iperiod=H264_KEYFRAME_PERIOD,
-            )
-            self._h264_output = H264Output(self._buffer)
-            self._picam.start_recording(self._encoder, self._h264_output)
-            self._apply_exposure_settings()
-
-            self._running = True
-            logger.info(
-                f"PicamBackend started (H.264 HW): {width}x{height} @ {CAMERA_FPS}fps, "
-                f"bitrate={H264_BITRATE // 1000}kbps, keyframe every {H264_KEYFRAME_PERIOD} frames"
-            )
-        else:
-            config = self._picam.create_video_configuration(
-                main={"size": CAMERA_RESOLUTION, "format": "RGB888"},
-                transform=self._build_transform(),
-            )
-            self._picam.configure(config)
-            self._picam.start()
-            self._apply_exposure_settings()
-
-            self._running = True
-            self._capture_thread = threading.Thread(
-                target=self._capture_loop, daemon=True
-            )
-            self._capture_thread.start()
-
-            mode_str = f"IR mode={self._ir_mode}" if self._ir_mode != "off" else "RGB"
-            logger.info(
-                f"PicamBackend started (MJPEG): {width}x{height} @ {CAMERA_FPS}fps, "
-                f"JPEG quality={self._jpeg_quality}, {mode_str}"
-            )
+        mode_str = f"IR mode={self._ir_mode}" if self._ir_mode != "off" else "RGB"
+        logger.info(
+            f"PicamBackend started (MJPEG): {width}x{height} @ {CAMERA_FPS}fps, "
+            f"JPEG quality={self._jpeg_quality}, {mode_str}"
+        )
 
     def _apply_exposure_settings(self) -> None:
         """Apply exposure settings via picamera2 controls."""
@@ -304,19 +256,13 @@ class PicamBackend(CameraBackend):
     def stop(self) -> None:
         """Stop camera capture and release resources."""
         self._running = False
-        if ENCODE_FORMAT == "h264":
-            if self._picam:
-                self._picam.stop_recording()
-                self._picam.close()
-                self._picam = None
-        else:
-            if self._capture_thread:
-                self._capture_thread.join(timeout=2.0)
-                self._capture_thread = None
-            if self._picam:
-                self._picam.stop()
-                self._picam.close()
-                self._picam = None
+        if self._capture_thread:
+            self._capture_thread.join(timeout=2.0)
+            self._capture_thread = None
+        if self._picam:
+            self._picam.stop()
+            self._picam.close()
+            self._picam = None
         logger.info("PicamBackend stopped")
 
     @staticmethod
@@ -345,7 +291,7 @@ class PicamBackend(CameraBackend):
 # V4L2/GStreamer Backend (for IMX462/VEYE cameras)
 # =============================================================================
 
-# Try to import GStreamer Python bindings for H.264 support
+# Try to import GStreamer Python bindings for MJPEG pipeline
 _gst_available = False
 try:
     import gi
@@ -356,7 +302,7 @@ try:
     _gst_available = True
     logger.debug("GStreamer Python bindings (PyGObject) loaded successfully")
 except (ImportError, ValueError) as e:
-    logger.warning(f"GStreamer Python bindings not available: {e}. H.264 mode disabled.")
+    logger.warning(f"GStreamer Python bindings not available: {e}. Will use OpenCV fallback.")
     Gst = None
     GstApp = None
     GLib = None
@@ -365,18 +311,16 @@ except (ImportError, ValueError) as e:
 class V4L2Backend(CameraBackend):
     """GStreamer-based capture for V4L2 cameras (IMX462/VEYE).
     
-    Supports both H.264 (hardware encoded via v4l2h264enc) and MJPEG modes.
-    H.264 requires PyGObject (python3-gi) with GStreamer bindings.
+    Captures frames via GStreamer MJPEG pipeline (PyGObject preferred, OpenCV fallback).
     """
 
     def __init__(self, buffer: FrameBuffer):
         super().__init__(buffer)
-        self._cap: Optional[cv2.VideoCapture] = None  # For MJPEG mode
-        self._pipeline = None  # For H.264 mode (GStreamer)
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._pipeline = None
         self._appsink = None
         self._capture_thread: Optional[threading.Thread] = None
         self._i2c_script = V4L2_I2C_SCRIPT.replace("~", "/home/admin")
-        self._use_h264 = False
 
     def start(self) -> None:
         """Initialize GStreamer pipeline and begin capturing."""
@@ -385,212 +329,7 @@ class V4L2Backend(CameraBackend):
         # Set camera to B&W mode (IR-CUT always open) for person detection
         self._run_i2c_command("daynightmode", "0xFE")
 
-        # Decide mode: H.264 if requested and PyGObject available, else MJPEG
-        if ENCODE_FORMAT == "h264" and _gst_available:
-            self._start_h264(width, height)
-        else:
-            if ENCODE_FORMAT == "h264" and not _gst_available:
-                logger.warning(
-                    "H.264 requested but PyGObject not available. "
-                    "Install python3-gi gir1.2-gstreamer-1.0. Falling back to MJPEG."
-                )
-            self._start_mjpeg(width, height)
-
-    def _start_h264(self, width: int, height: int) -> None:
-        """Start H.264 hardware encoding pipeline using PyGObject."""
-        # Pipeline feeds UYVY directly to v4l2h264enc (no colorspace conversion)
-        # This is critical - adding videoconvert causes CMA memory allocation failures
-        # on memory-constrained Pi 3A due to extra buffer requirements.
-        #
-        # The bcm2835-codec encoder accepts UYVY directly and converts internally.
-        # Using h264_profile=4 (high profile) is required for proper encoding.
-        
-        # Pre-configure encoder via v4l2-ctl (extra-controls doesn't always work)
-        encoder_device = "/dev/video11"  # bcm2835-codec-encode
-        try:
-            subprocess.run([
-                "v4l2-ctl", "-d", encoder_device,
-                "--set-ctrl", f"video_gop_size={H264_KEYFRAME_PERIOD}",
-                "--set-ctrl", f"video_bitrate={H264_BITRATE}",
-                "--set-ctrl", "h264_profile=1",  # Constrained Baseline (no B-frames)
-                "--set-ctrl", "repeat_sequence_header=1",
-                "--set-ctrl", "video_bitrate_mode=1",  # VBR for lower latency
-            ], check=True, capture_output=True, text=True)
-            logger.info(f"Encoder controls set: gop={H264_KEYFRAME_PERIOD}, bitrate={H264_BITRATE}, profile=baseline")
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to pre-set encoder controls: {e.stderr}")
-        except FileNotFoundError:
-            logger.warning("v4l2-ctl not found, relying on extra-controls")
-        
-        # h264_profile=1 = Constrained Baseline (no B-frames = lower latency)
-        # Minimize all buffers for lowest latency
-        # leaky=downstream drops OLD frames when queue is full (keeps latest)
-        pipeline_str = (
-            f"v4l2src device={V4L2_DEVICE} do-timestamp=true io-mode=mmap ! "
-            f"video/x-raw,format={V4L2_FORMAT},width={width},height={height},framerate={CAMERA_FPS}/1 ! "
-            f"v4l2h264enc name=enc extra-controls=\"controls,h264_profile=1,video_gop_size={H264_KEYFRAME_PERIOD},repeat_sequence_header=1,video_bitrate={H264_BITRATE},video_bitrate_mode=1\" ! "
-            f"video/x-h264,profile=constrained-baseline,level=(string)4,stream-format=byte-stream ! "
-            f"queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            f"appsink name=sink emit-signals=false drop=true sync=false max-buffers=1 wait-on-eos=false"
-        )
-        
-        logger.info(f"V4L2Backend H.264 pipeline: {pipeline_str}")
-        
-        try:
-            self._pipeline = Gst.parse_launch(pipeline_str)
-            self._appsink = self._pipeline.get_by_name("sink")
-            
-            ret = self._pipeline.set_state(Gst.State.PLAYING)
-            if ret == Gst.StateChangeReturn.FAILURE:
-                raise RuntimeError("Pipeline failed to start")
-            
-            # Wait briefly for pipeline to stabilize and check for errors
-            time.sleep(0.5)
-            bus = self._pipeline.get_bus()
-            msg = bus.pop_filtered(Gst.MessageType.ERROR)
-            if msg:
-                err, debug = msg.parse_error()
-                raise RuntimeError(f"{err.message}: {debug}")
-            
-            self._use_h264 = True
-            self._running = True
-            
-            logger.info(
-                f"V4L2Backend started (H.264 HW via bcm2835-codec): {width}x{height} @ {CAMERA_FPS}fps, "
-                f"bitrate={H264_BITRATE // 1000}kbps, device={V4L2_DEVICE}"
-            )
-            
-            # Start capture thread (polls appsink instead of using signals)
-            self._capture_thread = threading.Thread(
-                target=self._capture_loop_h264, daemon=True
-            )
-            self._capture_thread.start()
-            
-        except (GLib.Error, RuntimeError) as e:
-            logger.warning(f"H.264 encoding failed: {e}")
-            logger.info("Falling back to MJPEG mode (increase gpu_mem in config.txt for H.264)")
-            if self._pipeline:
-                self._pipeline.set_state(Gst.State.NULL)
-                self._pipeline = None
-            self._start_mjpeg(width, height)
-
-    def _force_keyframe_gst(self) -> None:
-        """Force encoder to produce a keyframe via GStreamer upstream event."""
-        try:
-            # Send force-keyunit event UPSTREAM from appsink toward encoder
-            if self._appsink:
-                import time
-                running_time = int(time.time() * Gst.SECOND)
-                structure = Gst.Structure.new_empty("GstForceKeyUnit")
-                structure.set_value("running-time", running_time)
-                structure.set_value("all-headers", True)
-                event = Gst.Event.new_custom(Gst.EventType.CUSTOM_UPSTREAM, structure)
-                self._appsink.send_event(event)
-        except Exception as e:
-            logger.debug(f"Force keyframe failed: {e}")
-
-    def _capture_loop_h264(self) -> None:
-        """Poll appsink for H.264 frames (signal-based approach requires GLib main loop)."""
-        logger.info("H.264 capture thread started")
-        frame_count = 0
-        wait_count = 0
-        bus = self._pipeline.get_bus()
-        
-        # Force keyframes periodically since video_gop_size doesn't apply dynamically
-        keyframe_interval = H264_KEYFRAME_PERIOD
-        next_keyframe_at = 1  # Force first frame to be keyframe
-        
-        while self._running:
-            try:
-                # Check for pipeline errors on the bus
-                while True:
-                    msg = bus.pop()
-                    if msg is None:
-                        break
-                    if msg.type == Gst.MessageType.ERROR:
-                        err, debug = msg.parse_error()
-                        logger.error(f"GStreamer ERROR: {err.message}")
-                        logger.error(f"GStreamer DEBUG: {debug}")
-                    elif msg.type == Gst.MessageType.WARNING:
-                        warn, debug = msg.parse_warning()
-                        logger.warning(f"GStreamer WARNING: {warn.message}")
-                    elif msg.type == Gst.MessageType.EOS:
-                        logger.warning("GStreamer EOS (end of stream)")
-                    elif msg.type == Gst.MessageType.STATE_CHANGED:
-                        if msg.src == self._pipeline:
-                            old, new, pending = msg.parse_state_changed()
-                            logger.info(f"Pipeline state: {old.value_nick} -> {new.value_nick}")
-                
-                # Use try_pull_sample with timeout to allow clean shutdown
-                sample = self._appsink.try_pull_sample(Gst.SECOND // 10)  # 100ms timeout
-                if sample is None:
-                    wait_count += 1
-                    # Log status every ~1 second (10 x 100ms timeouts)
-                    if wait_count % 10 == 1:
-                        ret, state, pending = self._pipeline.get_state(0)
-                        logger.info(f"Waiting for frames ({wait_count} polls), state={state.value_nick}, pending={pending.value_nick}")
-                    continue
-                    
-                buf = sample.get_buffer()
-                success, map_info = buf.map(Gst.MapFlags.READ)
-                if success:
-                    data = bytes(map_info.data)
-                    is_keyframe = self._is_h264_keyframe(data)
-                    self._buffer.update(data, keyframe=is_keyframe)
-                    buf.unmap(map_info)
-                    
-                    frame_count += 1
-                    wait_count = 0  # Reset wait counter on success
-                    
-                    # Force keyframe periodically - request BEFORE we need it
-                    # (keyframe will appear on next frame after request)
-                    if frame_count >= next_keyframe_at - 1:
-                        self._force_keyframe_gst()
-                        # Also try v4l2-ctl as fallback
-                        try:
-                            result = subprocess.run(
-                                ["v4l2-ctl", "-d", "/dev/video11", "--set-ctrl", "force_key_frame=1"],
-                                capture_output=True, check=False, timeout=0.5
-                            )
-                            logger.debug(f"Force keyframe at frame {frame_count}: rc={result.returncode}")
-                        except Exception as e:
-                            logger.debug(f"Force keyframe failed: {e}")
-                        next_keyframe_at = frame_count + keyframe_interval
-                    
-                    # Log first few frames and then every 100th at INFO level
-                    if frame_count <= 3:
-                        logger.info(f"H.264 frame {frame_count}: {len(data)} bytes, keyframe={is_keyframe}")
-                    elif frame_count % 100 == 0:
-                        logger.info(f"H.264 frames captured: {frame_count}")
-                        
-            except Exception as e:
-                if self._running:
-                    logger.error(f"H.264 capture error: {e}")
-                    time.sleep(0.1)
-        
-        logger.info("H.264 capture thread stopped")
-
-    @staticmethod
-    def _is_h264_keyframe(data: bytes) -> bool:
-        """Check if H.264 NAL unit is a keyframe (IDR slice)."""
-        # Look for NAL start codes and check NAL type
-        # NAL type 5 = IDR (Instantaneous Decoder Refresh) = keyframe
-        i = 0
-        while i < len(data) - 4:
-            # Check for start code (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01)
-            if data[i:i+3] == b'\x00\x00\x01':
-                nal_type = data[i+3] & 0x1F
-                if nal_type == 5:  # IDR slice
-                    return True
-                i += 3
-            elif data[i:i+4] == b'\x00\x00\x00\x01':
-                nal_type = data[i+4] & 0x1F
-                if nal_type == 5:  # IDR slice
-                    return True
-                i += 4
-            else:
-                i += 1
-        return False
+        self._start_mjpeg(width, height)
 
     def _start_mjpeg(self, width: int, height: int) -> None:
         """Start MJPEG capture using PyGObject GStreamer (more reliable than OpenCV)."""
@@ -626,7 +365,6 @@ class V4L2Backend(CameraBackend):
                 if ret == Gst.StateChangeReturn.FAILURE:
                     raise RuntimeError("Pipeline failed to start")
                 
-                self._use_h264 = False
                 self._running = True
                 self._capture_thread = threading.Thread(
                     target=self._capture_loop_mjpeg_gst, daemon=True
@@ -659,7 +397,6 @@ class V4L2Backend(CameraBackend):
         if not self._cap.isOpened():
             raise RuntimeError(f"Failed to open GStreamer pipeline: {pipeline}")
 
-        self._use_h264 = False
         self._running = True
         self._capture_thread = threading.Thread(
             target=self._capture_loop_mjpeg, daemon=True
@@ -685,7 +422,7 @@ class V4L2Backend(CameraBackend):
                 success, map_info = buf.map(Gst.MapFlags.READ)
                 if success:
                     data = bytes(map_info.data)
-                    self._buffer.update(data, keyframe=True)
+                    self._buffer.update(data)
                     buf.unmap(map_info)
                     
                     frame_count += 1
@@ -791,12 +528,11 @@ class V4L2Backend(CameraBackend):
         """Stop GStreamer pipeline and release resources."""
         self._running = False
 
-        # Stop capture thread first (for both H.264 and MJPEG modes)
         if self._capture_thread:
             self._capture_thread.join(timeout=2.0)
             self._capture_thread = None
 
-        if self._use_h264 and self._pipeline:
+        if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
             self._pipeline = None
             self._appsink = None
@@ -840,10 +576,6 @@ class Camera:
         if not self._backend or not self._backend._running:
             return None
         return self._buffer.wait_for_frame(timeout=timeout)
-
-    def get_latest_keyframe(self) -> Optional[bytes]:
-        """Get latest H.264 keyframe for new client initialization."""
-        return self._buffer.get_latest_keyframe()
 
     def get_settings(self) -> dict[str, Any]:
         """Get current runtime settings."""

@@ -39,18 +39,6 @@ CAMERA_FPS = 30
 # JPEG quality (1-100, higher = better quality, larger frames)
 JPEG_QUALITY = 80
 
-# Encoding format: "mjpeg" (CPU JPEG encoding) or "h264" (hardware H.264)
-# H.264 uses bcm2835-codec via v4l2h264enc + bcm2835-isp via v4l2convert
-# This provides hardware encoding on Pi 3/4/Zero2W with minimal CPU usage
-ENCODE_FORMAT = "mjpeg"
-
-# H.264 encoder bitrate in bits per second (only used when ENCODE_FORMAT = "h264")
-H264_BITRATE = 2_500_000
-
-# H.264 keyframe interval in frames (only used when ENCODE_FORMAT = "h264")
-# Lower = faster client sync but slightly larger stream
-H264_KEYFRAME_PERIOD = 30
-
 # Camera rotation (0, 90, 180, 270)
 CAMERA_ROTATION = 180
 

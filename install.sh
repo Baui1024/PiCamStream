@@ -2,6 +2,11 @@
 set -e
 
 # =============================================================================
+# User prompts
+# =============================================================================
+read -rp "Are you using USB WiFi? (y/n): " USE_USB_WIFI
+
+# =============================================================================
 # Fix corrupted dpkg state if needed
 # =============================================================================
 if ! sudo dpkg --audit > /dev/null 2>&1; then
@@ -155,6 +160,13 @@ elif [ -f /boot/config.txt ]; then
 fi
 if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=veyecam2m" "$CONFIG_TXT"; then
     echo "dtoverlay=veyecam2m" | sudo tee -a "$CONFIG_TXT"
+fi
+
+# Disable onboard WiFi if using USB WiFi
+if [[ "$USE_USB_WIFI" =~ ^[Yy] ]]; then
+    if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=disable-wifi" "$CONFIG_TXT"; then
+        echo "dtoverlay=disable-wifi" | sudo tee -a "$CONFIG_TXT"
+    fi
 fi
 
 cd "$OLDPWD"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -505,12 +506,14 @@ class V4L2Backend(CameraBackend):
         """Run VEYE I2C control script command."""
         try:
             cmd = f"{self._i2c_script} -w -f {param} -p1 {value}"
+            script_dir = os.path.dirname(self._i2c_script)
             result = subprocess.run(
                 cmd,
                 shell=True,
                 capture_output=True,
                 text=True,
                 timeout=5,
+                cwd=script_dir,
             )
             if result.returncode != 0:
                 logger.warning(f"I2C command failed: {cmd} -> {result.stderr}")

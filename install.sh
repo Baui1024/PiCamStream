@@ -162,6 +162,17 @@ if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=veyecam2m" "$CONFIG_TXT"; then
     echo "dtoverlay=veyecam2m" | sudo tee -a "$CONFIG_TXT"
 fi
 
+# =============================================================================
+# VEYE I2C control tools (compile from source for native 64-bit)
+# =============================================================================
+cd "$VEYE_DIR/i2c_cmd/source"
+chmod +x make.sh
+./make.sh
+chmod +x "$VEYE_DIR/i2c_cmd/veye_mipi_i2c.sh"
+chmod +x "$VEYE_DIR/i2c_cmd/i2c_read"
+chmod +x "$VEYE_DIR/i2c_cmd/i2c_write"
+echo "I2C tools compiled: i2c_read, i2c_write"
+
 # Disable onboard WiFi if using USB WiFi
 if [[ "$USE_USB_WIFI" =~ ^[Yy] ]]; then
     if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=disable-wifi" "$CONFIG_TXT"; then

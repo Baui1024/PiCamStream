@@ -19,7 +19,7 @@ V4L2_FORMAT = "UYVY"
 
 # Path to VEYE I2C control script (for ISP settings)
 # Clone from: https://github.com/veyeimaging/raspberrypi.git
-V4L2_I2C_SCRIPT = "~/raspberrypi_v4l2/i2c_cmd/bin/veye_mipi_i2c.sh"
+V4L2_I2C_SCRIPT = "~/raspberrypi_v4l2/i2c_cmd/veye_mipi_i2c.sh"
 
 # =============================================================================
 # Camera Settings

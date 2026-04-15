@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import cv2
-import numpy as np
 from loguru import logger
 
 from .config import (
@@ -22,14 +19,8 @@ from .config import (
     CAMERA_ROTATION,
     CAMERA_HFLIP,
     CAMERA_VFLIP,
-    IR_NIGHT_MODE,
-    IR_CLAHE_ENABLED,
-    CAMERA_AE_ENABLE,
-    CAMERA_EXPOSURE_TIME,
-    CAMERA_ANALOGUE_GAIN,
     V4L2_DEVICE,
     V4L2_FORMAT,
-    V4L2_I2C_SCRIPT,
 )
 
 
@@ -69,13 +60,6 @@ class CameraBackend(ABC):
         self._buffer = buffer
         self._running = False
         self._settings_lock = threading.Lock()
-
-        # Runtime-adjustable settings (initialized from config)
-        self._ir_mode = IR_NIGHT_MODE
-        self._clahe_enabled = IR_CLAHE_ENABLED
-        self._ae_enable = CAMERA_AE_ENABLE
-        self._exposure_time = CAMERA_EXPOSURE_TIME
-        self._analogue_gain = CAMERA_ANALOGUE_GAIN
         self._jpeg_quality = JPEG_QUALITY
 
     @abstractmethod
@@ -89,74 +73,19 @@ class CameraBackend(ABC):
         pass
 
     @abstractmethod
-    def _apply_exposure_settings(self) -> None:
-        """Apply current exposure settings to camera hardware."""
-        pass
-
     def get_settings(self) -> dict[str, Any]:
         """Get current runtime settings."""
-        with self._settings_lock:
-            return {
-                "ir_mode": self._ir_mode,
-                "clahe_enabled": self._clahe_enabled,
-                "ae_enable": self._ae_enable,
-                "exposure_time": self._exposure_time,
-                "analogue_gain": self._analogue_gain,
-                "jpeg_quality": self._jpeg_quality,
-            }
+        pass
 
+    @abstractmethod
     def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Update runtime settings. Returns the updated settings."""
-        with self._settings_lock:
-            exposure_changed = False
+        pass
 
-            if "ir_mode" in settings:
-                value = settings["ir_mode"]
-                if value in ("off", "grayscale", "blue_channel"):
-                    self._ir_mode = value
-
-            if "clahe_enabled" in settings:
-                self._clahe_enabled = bool(settings["clahe_enabled"])
-
-            if "ae_enable" in settings:
-                self._ae_enable = bool(settings["ae_enable"])
-                exposure_changed = True
-
-            if "exposure_time" in settings:
-                value = int(settings["exposure_time"])
-                if 100 <= value <= 200000:
-                    self._exposure_time = value
-                    exposure_changed = True
-
-            if "analogue_gain" in settings:
-                value = float(settings["analogue_gain"])
-                if 1.0 <= value <= 16.0:
-                    self._analogue_gain = value
-                    exposure_changed = True
-
-            if "jpeg_quality" in settings:
-                value = int(settings["jpeg_quality"])
-                if 1 <= value <= 100:
-                    self._jpeg_quality = value
-
-            # Apply exposure changes to camera hardware
-            if exposure_changed:
-                self._apply_exposure_settings()
-
-        return self.get_settings()
-
+    @abstractmethod
     def reset_settings(self) -> dict[str, Any]:
-        """Reset all settings to config file defaults."""
-        with self._settings_lock:
-            self._ir_mode = IR_NIGHT_MODE
-            self._clahe_enabled = IR_CLAHE_ENABLED
-            self._ae_enable = CAMERA_AE_ENABLE
-            self._exposure_time = CAMERA_EXPOSURE_TIME
-            self._analogue_gain = CAMERA_ANALOGUE_GAIN
-            self._jpeg_quality = JPEG_QUALITY
-            self._apply_exposure_settings()
-
-        return self.get_settings()
+        """Reset all settings to defaults."""
+        pass
 
 
 # =============================================================================
@@ -185,7 +114,6 @@ class PicamBackend(CameraBackend):
         )
         self._picam.configure(config)
         self._picam.start()
-        self._apply_exposure_settings()
 
         self._running = True
         self._capture_thread = threading.Thread(
@@ -193,40 +121,21 @@ class PicamBackend(CameraBackend):
         )
         self._capture_thread.start()
 
-        mode_str = f"IR mode={self._ir_mode}" if self._ir_mode != "off" else "RGB"
         logger.info(
             f"PicamBackend started (MJPEG): {width}x{height} @ {CAMERA_FPS}fps, "
-            f"JPEG quality={self._jpeg_quality}, {mode_str}"
+            f"JPEG quality={self._jpeg_quality}"
         )
 
-    def _apply_exposure_settings(self) -> None:
-        """Apply exposure settings via picamera2 controls."""
-        if not self._picam:
-            return
-
-        if self._ae_enable:
-            self._picam.set_controls({"AeEnable": True})
-            logger.info("Auto exposure enabled")
-        else:
-            self._picam.set_controls({
-                "AeEnable": False,
-                "ExposureTime": self._exposure_time,
-                "AnalogueGain": self._analogue_gain,
-            })
-            logger.info(f"Manual exposure: {self._exposure_time}us, gain={self._analogue_gain}")
-
     def _capture_loop(self) -> None:
-        """Continuously capture, process, and encode frames (MJPEG mode)."""
+        """Continuously capture and encode frames."""
         while self._running:
             try:
                 with self._settings_lock:
-                    ir_mode = self._ir_mode
-                    clahe_enabled = self._clahe_enabled
                     jpeg_quality = self._jpeg_quality
 
                 encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
                 frame = self._picam.capture_array("main")
-                frame = self._process_ir_mode(frame, ir_mode, clahe_enabled)
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                 success, jpeg_data = cv2.imencode(".jpg", frame, encode_params)
                 if success:
@@ -237,22 +146,22 @@ class PicamBackend(CameraBackend):
                     logger.error(f"Capture error: {e}")
                     time.sleep(0.1)
 
-    @staticmethod
-    def _process_ir_mode(frame: np.ndarray, ir_mode: str, clahe_enabled: bool) -> np.ndarray:
-        """Apply IR night vision processing."""
-        if ir_mode == "off":
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        elif ir_mode == "blue_channel":
-            blue = frame[:, :, 2]
-            return cv2.equalizeHist(blue)
-        elif ir_mode == "grayscale":
-            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-            if clahe_enabled:
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                gray = clahe.apply(gray)
-            return gray
-        else:
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    def get_settings(self) -> dict[str, Any]:
+        with self._settings_lock:
+            return {"jpeg_quality": self._jpeg_quality}
+
+    def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        with self._settings_lock:
+            if "jpeg_quality" in settings:
+                value = int(settings["jpeg_quality"])
+                if 1 <= value <= 100:
+                    self._jpeg_quality = value
+        return self.get_settings()
+
+    def reset_settings(self) -> dict[str, Any]:
+        with self._settings_lock:
+            self._jpeg_quality = JPEG_QUALITY
+        return self.get_settings()
 
     def stop(self) -> None:
         """Stop camera capture and release resources."""
@@ -312,7 +221,7 @@ except (ImportError, ValueError) as e:
 class V4L2Backend(CameraBackend):
     """GStreamer-based capture for V4L2 cameras (IMX462/VEYE).
     
-    Captures frames via GStreamer MJPEG pipeline (PyGObject preferred, OpenCV fallback).
+    ISP settings are persisted to JSON and managed via I2C.
     """
 
     def __init__(self, buffer: FrameBuffer):
@@ -321,22 +230,21 @@ class V4L2Backend(CameraBackend):
         self._pipeline = None
         self._appsink = None
         self._capture_thread: Optional[threading.Thread] = None
-        self._i2c_script = V4L2_I2C_SCRIPT.replace("~", "/home/admin")
+        self._isp_settings: dict[str, str] = {}
 
     def start(self) -> None:
-        """Initialize GStreamer pipeline and begin capturing."""
+        """Initialize ISP settings and GStreamer pipeline."""
+        from . import isp_settings
+
+        # Load settings from JSON or query camera on first run
+        self._isp_settings = isp_settings.load_or_init()
+
         width, height = CAMERA_RESOLUTION
-
-        # Set camera to B&W mode (IR-CUT always open) for person detection
-        self._run_i2c_command("daynightmode", "0xFE")
-
         self._start_mjpeg(width, height)
 
     def _start_mjpeg(self, width: int, height: int) -> None:
         """Start MJPEG capture using PyGObject GStreamer (more reliable than OpenCV)."""
         if _gst_available:
-            # Use PyGObject for MJPEG - more reliable than OpenCV's GStreamer backend
-            # Optionally scale down to reduce JPEG encoding CPU load
             out_w, out_h = STREAM_RESOLUTION if STREAM_RESOLUTION else (width, height)
             
             if (out_w, out_h) != (width, height):
@@ -459,73 +367,43 @@ class V4L2Backend(CameraBackend):
                     logger.error(f"MJPEG capture error: {e}")
                     time.sleep(0.1)
 
-    def _apply_exposure_settings(self) -> None:
-        """Apply exposure settings via VEYE I2C script."""
-        if self._ae_enable:
-            # Auto exposure: mshutter=0x40
-            self._run_i2c_command("mshutter", "0x40")
-            logger.info("V4L2Backend: Auto exposure enabled")
-        else:
-            # Manual exposure - map microseconds to VEYE shutter values
-            # VEYE uses predefined shutter speeds, not direct microseconds
-            # 0x41=1/30, 0x42=1/60, 0x43=1/120, 0x44=1/240, etc.
-            shutter_val = self._map_exposure_to_veye(self._exposure_time)
-            self._run_i2c_command("mshutter", shutter_val)
-            # AGC for gain control
-            agc_val = hex(min(15, max(0, int(self._analogue_gain))))
-            self._run_i2c_command("agc", agc_val)
-            logger.info(f"V4L2Backend: Manual exposure shutter={shutter_val}, agc={agc_val}")
+    # -- ISP settings via I2C --
 
-    @staticmethod
-    def _map_exposure_to_veye(exposure_us: int) -> str:
-        """Map microseconds exposure to VEYE mshutter value."""
-        # VEYE shutter values for NTSC (30fps base)
-        # exposure_us -> approximate match
-        if exposure_us >= 33333:  # >= 1/30s
-            return "0x41"
-        elif exposure_us >= 16666:  # >= 1/60s
-            return "0x42"
-        elif exposure_us >= 8333:  # >= 1/120s
-            return "0x43"
-        elif exposure_us >= 4166:  # >= 1/240s
-            return "0x44"
-        elif exposure_us >= 2083:  # >= 1/480s
-            return "0x45"
-        elif exposure_us >= 1000:  # >= 1/1000s
-            return "0x46"
-        elif exposure_us >= 500:  # >= 1/2000s
-            return "0x47"
-        elif exposure_us >= 200:  # >= 1/5000s
-            return "0x48"
-        elif exposure_us >= 100:  # >= 1/10000s
-            return "0x49"
-        else:
-            return "0x4A"  # 1/50000s
+    def get_settings(self) -> dict[str, Any]:
+        with self._settings_lock:
+            return {
+                "jpeg_quality": self._jpeg_quality,
+                **self._isp_settings,
+            }
 
-    def _run_i2c_command(self, param: str, value: str) -> bool:
-        """Run VEYE I2C control script command."""
-        try:
-            cmd = f"{self._i2c_script} -w -f {param} -p1 {value}"
-            script_dir = os.path.dirname(self._i2c_script)
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                cwd=script_dir,
-            )
-            if result.returncode != 0:
-                logger.warning(f"I2C command failed: {cmd} -> {result.stderr}")
-                return False
-            logger.debug(f"I2C command success: {param}={value}")
-            return True
-        except subprocess.TimeoutExpired:
-            logger.error(f"I2C command timeout: {param}={value}")
-            return False
-        except Exception as e:
-            logger.error(f"I2C command error: {e}")
-            return False
+    def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        from . import isp_settings
+
+        with self._settings_lock:
+            if "jpeg_quality" in settings:
+                value = int(settings["jpeg_quality"])
+                if 1 <= value <= 100:
+                    self._jpeg_quality = value
+
+            # Update ISP params via I2C
+            for param, value in settings.items():
+                if param in isp_settings.ISP_PARAMS:
+                    isp_settings.update_param(
+                        self._isp_settings, param, str(value)
+                    )
+
+        return self.get_settings()
+
+    def reset_settings(self) -> dict[str, Any]:
+        from . import isp_settings
+
+        with self._settings_lock:
+            self._jpeg_quality = JPEG_QUALITY
+            # Re-query camera for current hardware defaults
+            self._isp_settings = isp_settings.query_camera()
+            isp_settings.save(self._isp_settings)
+
+        return self.get_settings()
 
     def stop(self) -> None:
         """Stop GStreamer pipeline and release resources."""

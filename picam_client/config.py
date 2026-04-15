@@ -17,9 +17,9 @@ V4L2_DEVICE = "/dev/video0"
 # Raw pixel format from sensor (IMX462 outputs UYVY)
 V4L2_FORMAT = "UYVY"
 
-# Path to VEYE I2C control script (for ISP settings)
-# Clone from: https://github.com/veyeimaging/raspberrypi.git
-V4L2_I2C_SCRIPT = "~/raspberrypi_v4l2/i2c_cmd/veye_mipi_i2c.sh"
+# I2C bus and device address for VEYE ISP control
+V4L2_I2C_BUS = 10
+V4L2_I2C_ADDR = 0x3B
 
 # =============================================================================
 # Camera Settings
@@ -45,34 +45,6 @@ CAMERA_ROTATION = 180
 # Horizontal / vertical flip
 CAMERA_HFLIP = False
 CAMERA_VFLIP = False
-
-# IR Night Vision mode - converts to grayscale for cleaner IR LED illumination
-# Options: "off", "grayscale", "blue_channel"
-#   - "off": Normal RGB output
-#   - "grayscale": Recommended - averages channels to reduce noise
-#   - "blue_channel": Noisier - uses only blue channel (where IR signal is strongest
-#                     on OV5647, but single-channel amplifies sensor noise)
-IR_NIGHT_MODE = "grayscale"
-
-# CLAHE (Contrast Limited Adaptive Histogram Equalization)
-# Improves local contrast in night mode, but costs ~10 FPS on Pi 4
-IR_CLAHE_ENABLED = True
-
-# =============================================================================
-# Exposure Settings
-# =============================================================================
-
-# Auto exposure - set False for manual control (recommended for IR night vision)
-CAMERA_AE_ENABLE = False
-
-# Manual exposure time in microseconds (only used when AE disabled)
-# Lower = darker but less hotspot bloom, Higher = brighter but more saturation
-# Typical range: 1000 (1ms) - 100000 (100ms)
-CAMERA_EXPOSURE_TIME = 30000
-
-# Analogue gain (only used when AE disabled)
-# Higher = brighter but more noise. Typical range: 1.0 - 16.0
-CAMERA_ANALOGUE_GAIN = 4.0
 
 # =============================================================================
 # TCP Stream Server

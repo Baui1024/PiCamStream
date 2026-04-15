@@ -82,7 +82,7 @@ sudo apt install -y python3-libcamera python3-kms++ || true
 # Python packages (system-wide)
 # =============================================================================
 sudo apt install -y python3-pip python3-numpy python3-opencv
-pip install --break-system-packages picamera2 loguru websockets
+pip install --break-system-packages picamera2 loguru websockets smbus2
 
 # =============================================================================
 # VEYE/IMX462 camera driver (build from source)
@@ -162,16 +162,8 @@ if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=veyecam2m" "$CONFIG_TXT"; then
     echo "dtoverlay=veyecam2m" | sudo tee -a "$CONFIG_TXT"
 fi
 
-# =============================================================================
-# VEYE I2C control tools (compile from source for native 64-bit)
-# =============================================================================
-cd "$VEYE_DIR/i2c_cmd/source"
-chmod +x make.sh
-./make.sh
-chmod +x "$VEYE_DIR/i2c_cmd/veye_mipi_i2c.sh"
-chmod +x "$VEYE_DIR/i2c_cmd/i2c_read"
-chmod +x "$VEYE_DIR/i2c_cmd/i2c_write"
-echo "I2C tools compiled: i2c_read, i2c_write"
+# VEYE I2C control tools no longer needed at runtime (smbus2 replaces them)
+# but keep the repo around for manual debugging with veye_mipi_i2c.sh
 
 # Disable onboard WiFi if using USB WiFi
 if [[ "$USE_USB_WIFI" =~ ^[Yy] ]]; then

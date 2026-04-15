@@ -9,5 +9,6 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy>=1.26",
     "opencv-python-headless>=4.8",
+    "smbus2>=0.4",
     "websockets>=12.0",
 ]

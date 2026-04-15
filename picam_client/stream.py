@@ -7,6 +7,7 @@ Optionally wraps the socket in TLS for encrypted transport.
 """
 
 import asyncio
+import socket
 import ssl
 import struct
 from pathlib import Path
@@ -73,6 +74,7 @@ class StreamServer:
         """Continuously capture frames and push to all connected clients."""
         frame_interval = 1.0 / CAMERA_FPS
         frame_count = 0
+        slow_clients: set[asyncio.StreamWriter] = set()  # Track backed-up clients
 
         while self._running:
             if not self._clients:
@@ -97,15 +99,29 @@ class StreamServer:
                     f"{len(self._clients)} client(s)"
                 )
 
-            # Send to every connected client; drop frame if drain takes too long
+            # Send to every connected client; skip slow clients until they catch up
             disconnected: list[asyncio.StreamWriter] = []
             for writer in list(self._clients):
+                # Skip clients that are backed up
+                if writer in slow_clients:
+                    # Check if they've caught up (drain succeeds instantly)
+                    try:
+                        await asyncio.wait_for(writer.drain(), timeout=0.001)
+                        slow_clients.discard(writer)
+                        logger.debug("Slow client recovered")
+                    except asyncio.TimeoutError:
+                        continue  # Still backed up, skip this frame
+                    except Exception:
+                        disconnected.append(writer)
+                        continue
+
                 try:
                     writer.write(payload)
-                    await asyncio.wait_for(writer.drain(), timeout=0.3)
+                    await asyncio.wait_for(writer.drain(), timeout=0.05)  # Tighter timeout
                 except asyncio.TimeoutError:
-                    # Network can't keep up — drop this frame for this client
-                    logger.debug("Frame dropped for slow client")
+                    # Mark as slow - will skip frames until caught up
+                    slow_clients.add(writer)
+                    logger.debug("Client backing up, skipping frames")
                 except Exception:
                     disconnected.append(writer)
 
@@ -127,6 +143,13 @@ class StreamServer:
     ) -> None:
         addr = writer.get_extra_info("peername")
         logger.info(f"Client connected: {addr}")
+
+        # Disable Nagle's algorithm for lower latency
+        sock = writer.get_extra_info("socket")
+        if sock:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # Limit send buffer to ~2 frames worth to prevent latency buildup
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
 
         # For H.264, send latest keyframe so client can begin decoding
         if ENCODE_FORMAT == "h264":

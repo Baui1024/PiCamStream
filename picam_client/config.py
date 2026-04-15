@@ -1,11 +1,37 @@
 """Configuration for Pi camera streaming client."""
 
 # =============================================================================
+# Camera Backend Selection
+# =============================================================================
+
+# Backend: "picam" (picamera2 for standard Pi cameras) or "v4l2" (GStreamer for IMX462/VEYE)
+CAMERA_BACKEND = "v4l2"
+
+# =============================================================================
+# V4L2/GStreamer Settings (only used when CAMERA_BACKEND = "v4l2")
+# =============================================================================
+
+# V4L2 device path
+V4L2_DEVICE = "/dev/video0"
+
+# Raw pixel format from sensor (IMX462 outputs UYVY)
+V4L2_FORMAT = "UYVY"
+
+# Path to VEYE I2C control script (for ISP settings)
+# Clone from: https://github.com/veyeimaging/raspberrypi.git
+V4L2_I2C_SCRIPT = "~/raspberrypi_v4l2/i2c_cmd/bin/veye_mipi_i2c.sh"
+
+# =============================================================================
 # Camera Settings
 # =============================================================================
 
-# Resolution (width, height)
+# Resolution (width, height) - sensor capture resolution
 CAMERA_RESOLUTION = (1920, 1080)
+
+# Stream/output resolution (width, height) - scaled before encoding
+# Set to None to use CAMERA_RESOLUTION (no scaling)
+# Lower resolution reduces CPU load for MJPEG encoding
+STREAM_RESOLUTION = (1136, 640)
 
 # Framerate cap
 CAMERA_FPS = 30
@@ -14,12 +40,12 @@ CAMERA_FPS = 30
 JPEG_QUALITY = 80
 
 # Encoding format: "mjpeg" (CPU JPEG encoding) or "h264" (hardware H.264)
-# H.264 uses the Pi's hardware encoder for much lower CPU usage at 1080p30
-# Note: IR night mode processing is only available in MJPEG mode
-ENCODE_FORMAT = "h264"
+# H.264 uses bcm2835-codec via v4l2h264enc + bcm2835-isp via v4l2convert
+# This provides hardware encoding on Pi 3/4/Zero2W with minimal CPU usage
+ENCODE_FORMAT = "mjpeg"
 
 # H.264 encoder bitrate in bits per second (only used when ENCODE_FORMAT = "h264")
-H264_BITRATE = 5_000_000
+H264_BITRATE = 2_500_000
 
 # H.264 keyframe interval in frames (only used when ENCODE_FORMAT = "h264")
 # Lower = faster client sync but slightly larger stream
@@ -65,7 +91,7 @@ CAMERA_ANALOGUE_GAIN = 4.0
 # =============================================================================
 
 # Bind address (0.0.0.0 = all interfaces)
-STREAM_HOST = "192.168.178.173"
+STREAM_HOST = "0.0.0.0"
 
 # Port the inference server connects to
 STREAM_PORT = 8081

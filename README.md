@@ -1,6 +1,6 @@
 # PiCamStream
 
-Raspberry Pi camera streaming client for the [MotionAISensor](https://github.com/your-org/MotionAISensor) inference server.
+Raspberry Pi camera streaming client for the [InferenceServer](https://github.com/Baui1024/InferenceServer).
 Captures frames from a Pi camera and streams them over TCP (with optional TLS) as length-prefixed JPEGs.
 
 Supports two camera backends:
@@ -21,8 +21,8 @@ Supports two camera backends:
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-org/MotionAISensor.git
-cd MotionAISensor/PiCamStream
+git clone https://github.com/Baui1024/PiCamStream.git
+cd PiCamStream
 ```
 
 ### 2. Run the install script

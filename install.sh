@@ -174,6 +174,9 @@ fi
 
 cd "$OLDPWD"
 
+# Install systemd service
+bash "$(dirname "$0")/install_service.sh"
+
 echo "Installation complete. Rebooting in 5 seconds..."
 sleep 5
 sudo reboot

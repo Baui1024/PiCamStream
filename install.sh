@@ -5,6 +5,7 @@ set -e
 # User prompts
 # =============================================================================
 read -rp "Are you using USB WiFi? (y/n): " USE_USB_WIFI
+read -rp "Enable TLS encrypted streaming? (y/n): " USE_TLS
 
 # =============================================================================
 # Fix corrupted dpkg state if needed
@@ -173,6 +174,15 @@ if [[ "$USE_USB_WIFI" =~ ^[Yy] ]]; then
 fi
 
 cd "$OLDPWD"
+
+# =============================================================================
+# TLS setup (if requested)
+# =============================================================================
+if [[ "$USE_TLS" =~ ^[Yy] ]]; then
+    bash "$(dirname "$0")/generate_certs.sh"
+    sed -i 's/^TLS_ENABLED = False/TLS_ENABLED = True/' "$(dirname "$0")/picam_client/config.py"
+    echo "TLS enabled in picam_client/config.py"
+fi
 
 # Install systemd service
 bash "$(dirname "$0")/install_service.sh"

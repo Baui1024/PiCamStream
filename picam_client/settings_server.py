@@ -2,11 +2,19 @@
 
 import asyncio
 import json
+import ssl
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from .config import SETTINGS_WS_HOST, SETTINGS_WS_PORT
+from .config import (
+    SETTINGS_WS_HOST,
+    SETTINGS_WS_PORT,
+    TLS_ENABLED,
+    TLS_CERT_FILE,
+    TLS_KEY_FILE,
+)
 
 # Try to import websockets
 _websockets_available = False
@@ -41,13 +49,27 @@ class SettingsServer:
             return
 
         try:
+            ssl_ctx = None
+            if TLS_ENABLED:
+                cert = Path(TLS_CERT_FILE)
+                key = Path(TLS_KEY_FILE)
+                if cert.exists() and key.exists():
+                    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                    ssl_ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+                    logger.info("Settings WebSocket: TLS enabled")
+                else:
+                    logger.warning("TLS enabled but cert/key not found — falling back to plain WS")
+
             self._server = await serve(
                 self._handle_client,
                 SETTINGS_WS_HOST,
                 SETTINGS_WS_PORT,
+                ssl=ssl_ctx,
             )
+            proto = "wss" if ssl_ctx else "ws"
             logger.info(
-                f"Settings WebSocket server listening on ws://{SETTINGS_WS_HOST}:{SETTINGS_WS_PORT}"
+                f"Settings WebSocket server listening on {proto}://{SETTINGS_WS_HOST}:{SETTINGS_WS_PORT}"
             )
         except Exception as e:
             logger.error(f"Failed to start WebSocket server: {e}")

@@ -87,3 +87,17 @@ TLS_CA_FILE = "certs/ca.pem"  # CA that signed the client cert
 # =============================================================================
 
 LOG_LEVEL = "INFO"
+
+# =============================================================================
+# TSL27721 Ambient Light Sensor (custom nightvision board)
+# =============================================================================
+
+# I2C bus and address of the TSL27721 (fixed address, 0x39)
+LIGHT_SENSOR_I2C_BUS = 1
+LIGHT_SENSOR_I2C_ADDR = 0x39
+
+# Glass attenuation factor: 1.0 = bare sensor in open air. If the sensor sits
+# behind a window/dome, raise this by the window's transmission loss
+# (e.g. 40% transmission -> GA = 2.5). Pure scale factor on the lux output;
+# calibrate against a reference meter once the board is in its enclosure.
+LIGHT_SENSOR_GLASS_ATTENUATION = 1.0

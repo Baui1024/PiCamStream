@@ -1,11 +1,36 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANSWER_FILE="${SCRIPT_DIR}/.install_answers"
+
 # =============================================================================
-# User prompts
+# Helpers
 # =============================================================================
-read -rp "Are you using USB WiFi? (y/n): " USE_USB_WIFI
-read -rp "Enable TLS encrypted streaming? (y/n): " USE_TLS
+pkg_exists() { apt-cache show "$1" > /dev/null 2>&1; }
+has_build_dir() { [ -d "/lib/modules/$1/build" ]; }
+
+# Newest kernel installed on this system that has usable headers
+newest_kernel_with_headers() {
+    local m
+    for m in /lib/modules/*; do
+        [ -d "$m/build" ] && basename "$m"
+    done | sort -V | tail -n 1
+}
+
+# =============================================================================
+# User prompts (answers are remembered so a re-run after reboot is silent)
+# =============================================================================
+if [ -f "$ANSWER_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$ANSWER_FILE"
+    echo "Using saved answers from ${ANSWER_FILE} (delete it to change them)."
+    echo "  USB WiFi: $USE_USB_WIFI   TLS: $USE_TLS"
+else
+    read -rp "Are you using USB WiFi? (y/n): " USE_USB_WIFI
+    read -rp "Enable TLS encrypted streaming? (y/n): " USE_TLS
+    printf 'USE_USB_WIFI=%q\nUSE_TLS=%q\n' "$USE_USB_WIFI" "$USE_TLS" > "$ANSWER_FILE"
+fi
 
 # =============================================================================
 # Fix corrupted dpkg state if needed
@@ -20,14 +45,79 @@ fi
 sudo apt update -y
 sudo apt full-upgrade -y
 
-# Kernel headers (package name differs across Pi OS versions)
-if apt-cache show raspberrypi-kernel-headers > /dev/null 2>&1; then
-    sudo apt install -y raspberrypi-kernel raspberrypi-kernel-headers
-elif apt-cache show linux-headers-rpi-v8 > /dev/null 2>&1; then
-    sudo apt install -y linux-headers-rpi-v8
-else
-    sudo apt install -y linux-headers-$(uname -r) || sudo apt install -y linux-headers-arm64
+# =============================================================================
+# Kernel headers for the RUNNING kernel
+#
+# The VEYE driver is an out-of-tree kernel module: it must be compiled against
+# /lib/modules/$(uname -r)/build, i.e. the headers of the kernel that is booted
+# right now -- not just "some" kernel headers package.
+#
+# Raspberry Pi OS ships one kernel flavour per model/bitness:
+#   v6   -> Pi 1 / Zero / Zero W            (armel)
+#   v7   -> Pi 2 / 3 / Zero 2 W, 32-bit     (armhf)   <-- Pi Zero 2 W default
+#   v7l  -> Pi 4 / 400, 32-bit              (armhf)
+#   v8   -> Pi 3 and newer, 64-bit          (arm64)
+#   2712 -> Pi 5                            (arm64)
+# linux-headers-rpi-v8 is installable on armhf too, so hardcoding it on a v7
+# kernel silently gives headers that can never match uname -r.
+# =============================================================================
+KVER="$(uname -r)"          # e.g. 6.12.47+rpt-rpi-v7
+KFLAVOR="${KVER##*-}"       # e.g. v7
+
+echo "Running kernel: ${KVER} (flavour: ${KFLAVOR})"
+
+if ! has_build_dir "$KVER"; then
+    if pkg_exists "linux-headers-${KVER}"; then
+        # Exact match for the running kernel -> no reboot required
+        sudo apt install -y "linux-headers-${KVER}"
+    elif pkg_exists "linux-headers-rpi-${KFLAVOR}"; then
+        # Metapackage: pulls headers (and image) for the NEWEST kernel of this
+        # flavour, which may be newer than the one currently booted.
+        sudo apt install -y "linux-image-rpi-${KFLAVOR}" "linux-headers-rpi-${KFLAVOR}"
+    elif pkg_exists raspberrypi-kernel-headers; then
+        # Bullseye and older
+        sudo apt install -y raspberrypi-kernel raspberrypi-kernel-headers
+    else
+        echo "ERROR: no kernel headers package found for ${KVER} (flavour ${KFLAVOR})." >&2
+        echo "       Try: sudo apt install linux-headers-rpi-${KFLAVOR}" >&2
+        exit 1
+    fi
 fi
+
+# =============================================================================
+# Reboot gate
+# =============================================================================
+if ! has_build_dir "$KVER"; then
+    AVAILABLE="$(newest_kernel_with_headers)"
+    echo ""
+    echo "============================================================"
+    echo "  Cannot build the camera driver for the running kernel."
+    echo ""
+    echo "    running kernel : ${KVER}"
+    echo "    headers found  : ${AVAILABLE:-none}"
+    echo ""
+    if [ -n "$AVAILABLE" ] && [ "${AVAILABLE##*-}" != "$KFLAVOR" ]; then
+        echo "  The installed headers are for a different kernel FLAVOUR."
+        echo "  This Pi runs ${KFLAVOR}, so it needs linux-headers-rpi-${KFLAVOR}"
+        echo "  and linux-image-rpi-${KFLAVOR}."
+    else
+        echo "  The kernel was upgraded, but the old kernel is still running."
+    fi
+    echo ""
+    echo "  Reboot, then run this script again:"
+    echo "      sudo reboot"
+    echo "      ${SCRIPT_DIR}/install.sh"
+    echo "  (your answers are remembered, it will not ask again)"
+    echo "============================================================"
+    echo ""
+    read -rp "Reboot now? (y/n): " DO_REBOOT
+    if [[ "$DO_REBOOT" =~ ^[Yy] ]]; then
+        sudo reboot
+    fi
+    exit 1
+fi
+
+echo "Kernel headers OK: /lib/modules/${KVER}/build"
 
 # =============================================================================
 # Enable I2C
@@ -86,22 +176,11 @@ sudo apt install -y python3-pip python3-numpy python3-opencv
 pip install --break-system-packages picamera2 loguru websockets smbus2
 
 # =============================================================================
-# VEYE/IMX462 camera driver (build from source)
+# VEYE/IMX462 camera driver (built from source against the running kernel)
 # =============================================================================
 
-# Build dependencies
-sudo apt install -y git bc bison flex libssl-dev make
-
-# Verify the build directory exists; abort early if not
-if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
-    echo ""
-    echo "============================================================"
-    echo "  Kernel was upgraded but the old kernel is still running."
-    echo "  Please reboot the Pi and run this script again."
-    echo "============================================================"
-    echo ""
-    exit 1
-fi
+# Build dependencies (build-essential = gcc, device-tree-compiler = dtc)
+sudo apt install -y git bc bison flex libssl-dev make build-essential device-tree-compiler
 
 # Clone driver repo
 VEYE_DIR="$HOME/raspberrypi_v4l2"
@@ -111,11 +190,26 @@ else
     git clone https://github.com/veyeimaging/raspberrypi_v4l2.git "$VEYE_DIR"
 fi
 
-# Detect kernel version and select matching source directories
-KVER=$(uname -r)                         # e.g. 6.6.51+rpt-rpi-v8
-KMAJMIN=$(echo "$KVER" | grep -oP '^\d+\.\d+')  # e.g. 6.6
-
 # Map kernel version to driver source folder
+KREST="${KVER#*.}"
+KMAJMIN="${KVER%%.*}.${KREST%%.*}"   # 6.12.47+rpt-rpi-v7 -> 6.12
+
+# Newest rpi-<maj>.<min>.y directory in $1 that is <= $2. Used when the running
+# kernel is newer than anything VEYE ships source for.
+newest_src_dir_upto() {
+    local base="$1" want="$2" best="" d v
+    for d in "$base"/rpi-*.y; do
+        [ -d "$d" ] || continue
+        v="$(basename "$d")"; v="${v#rpi-}"; v="${v%.y}"
+        case "$v" in *[!0-9.]*) continue ;; esac   # skip rpi-6.1.y-bookworm etc.
+        [ "$(printf '%s\n%s\n' "$v" "$want" | sort -V | head -n 1)" = "$v" ] || continue
+        if [ -z "$best" ] || [ "$(printf '%s\n%s\n' "$best" "$v" | sort -V | tail -n 1)" = "$v" ]; then
+            best="$v"
+        fi
+    done
+    [ -n "$best" ] && echo "rpi-${best}.y"
+}
+
 case "$KMAJMIN" in
     6.12) DRV_DIR="rpi-6.12.y" ; DTS_DIR="rpi-6.12.y" ;;
     6.6)  DRV_DIR="rpi-6.6.y"  ; DTS_DIR="rpi-6.6.y"  ;;
@@ -123,10 +217,43 @@ case "$KMAJMIN" in
     5.15) DRV_DIR="rpi-5.15_all"; DTS_DIR="rpi-5.15.y" ;;
     5.10) DRV_DIR="rpi-5.x_all" ; DTS_DIR="rpi-5.10.y" ;;
     5.4)  DRV_DIR="rpi-5.x_all" ; DTS_DIR="rpi-5.4_all" ;;
-    *)    echo "ERROR: Unsupported kernel version $KMAJMIN"; exit 1 ;;
+    *)
+        # No exact match. Fall back to the newest older source tree and try it;
+        # the in-kernel V4L2 API changes between releases, so this may not build.
+        DRV_DIR="$(newest_src_dir_upto "$VEYE_DIR/driver_source/cam_drv_src" "$KMAJMIN")"
+        DTS_DIR="$(newest_src_dir_upto "$VEYE_DIR/driver_source/dts" "$KMAJMIN")"
+        if [ -z "$DRV_DIR" ] || [ -z "$DTS_DIR" ]; then
+            echo "ERROR: kernel $KMAJMIN is older than any VEYE driver source." >&2
+            exit 1
+        fi
+        echo ""
+        echo "============================================================"
+        echo "  WARNING: kernel $KMAJMIN is newer than any driver source"
+        echo "  published by VEYE (newest available: ${DRV_DIR#rpi-})."
+        echo ""
+        echo "  Falling back to $DRV_DIR. If the V4L2 kernel API changed in"
+        echo "  between, the build below will fail. In that case, run the"
+        echo "  camera on a kernel VEYE supports:"
+        echo ""
+        echo "      apt list -a linux-image-rpi-${KFLAVOR}   # older versions still in the archive?"
+        echo "      sudo apt install linux-image-rpi-${KFLAVOR}=<older-version>"
+        echo "      sudo apt-mark hold linux-image-rpi-${KFLAVOR}"
+        echo "      sudo reboot && ${SCRIPT_DIR}/install.sh"
+        echo ""
+        echo "  Or check https://github.com/veyeimaging/raspberrypi_v4l2 for"
+        echo "  a newer source tree."
+        echo "============================================================"
+        echo ""
+        ;;
 esac
 
-echo "Kernel $KVER → driver=$DRV_DIR, dts=$DTS_DIR"
+echo "Kernel $KVER -> driver=$DRV_DIR, dts=$DTS_DIR"
+
+if [ ! -d "$VEYE_DIR/driver_source/cam_drv_src/$DRV_DIR" ]; then
+    echo "ERROR: $VEYE_DIR/driver_source/cam_drv_src/$DRV_DIR does not exist." >&2
+    echo "       The VEYE repo has no driver source for kernel $KMAJMIN." >&2
+    exit 1
+fi
 
 # Compile drivers
 cd "$VEYE_DIR/driver_source/cam_drv_src/$DRV_DIR"
@@ -136,7 +263,7 @@ make
 # Install driver modules
 MOD_DIR="/lib/modules/$KVER/kernel/drivers/media/i2c"
 sudo mkdir -p "$MOD_DIR"
-sudo cp *.ko "$MOD_DIR/"
+sudo cp ./*.ko "$MOD_DIR/"
 sudo depmod -a
 
 # Compile device tree overlays
@@ -150,7 +277,16 @@ if [ -d /boot/firmware/overlays ]; then
 else
     OVERLAY_DIR="/boot/overlays"
 fi
-sudo cp *.dtbo "$OVERLAY_DIR/"
+sudo cp ./*.dtbo "$OVERLAY_DIR/"
+
+# The modules are installed under /lib/modules/$KVER only. A later kernel
+# upgrade would leave the camera without a driver until this script is re-run,
+# so pin the kernel. Undo with:
+#   sudo apt-mark unhold linux-image-rpi-<flavour> linux-headers-rpi-<flavour>
+if pkg_exists "linux-headers-rpi-${KFLAVOR}"; then
+    sudo apt-mark hold "linux-image-rpi-${KFLAVOR}" "linux-headers-rpi-${KFLAVOR}" || true
+    echo "Kernel packages held at ${KVER} (driver modules are built for this version)."
+fi
 
 # Enable veyecam2m overlay in boot config
 CONFIG_TXT=""
@@ -173,19 +309,25 @@ if [[ "$USE_USB_WIFI" =~ ^[Yy] ]]; then
     fi
 fi
 
-cd "$OLDPWD"
+cd "$SCRIPT_DIR"
 
 # =============================================================================
 # TLS setup (if requested)
 # =============================================================================
+CONFIG_PY="${SCRIPT_DIR}/picam_client/config.py"
 if [[ "$USE_TLS" =~ ^[Yy] ]]; then
-    bash "$(dirname "$0")/generate_certs.sh"
-    sed -i 's/^TLS_ENABLED = False/TLS_ENABLED = True/' "$(dirname "$0")/picam_client/config.py"
+    bash "${SCRIPT_DIR}/generate_certs.sh"
+    sed -i 's/^TLS_ENABLED = .*/TLS_ENABLED = True/' "$CONFIG_PY"
     echo "TLS enabled in picam_client/config.py"
+    echo "  -> set \"use_tls\": true for this camera in the InferenceServer's cameras.json"
+else
+    sed -i 's/^TLS_ENABLED = .*/TLS_ENABLED = False/' "$CONFIG_PY"
+    echo "TLS disabled in picam_client/config.py"
+    echo "  -> set \"use_tls\": false for this camera in the InferenceServer's cameras.json"
 fi
 
 # Install systemd service
-bash "$(dirname "$0")/install_service.sh"
+bash "${SCRIPT_DIR}/install_service.sh"
 
 echo "Installation complete. Rebooting in 5 seconds..."
 sleep 5

@@ -46,3 +46,8 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+
+# PiCamStream local state
+.install_answers
+certs/
+isp_settings.json

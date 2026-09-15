@@ -38,7 +38,13 @@ chmod +x install.sh
 > The script will ask if you are using USB WiFi (to disable the onboard radio).
 > It reboots the Pi automatically when finished.
 
-After reboot, PiCamStream starts automatically as a systemd service.
+**Expect to run it twice.** The first run does a full `apt` upgrade, which
+usually installs a newer kernel. The VEYE camera driver must be compiled
+against the kernel that is *actually booted*, so if the kernel changed the
+script stops and offers to reboot. Run it again after the reboot — your
+answers are remembered, so it will not ask the questions a second time.
+
+After the final reboot, PiCamStream starts automatically as a systemd service.
 
 ### 3. Add the camera in the Inference Server
 
@@ -64,7 +70,56 @@ python main.py
 | picamera2 | Installs libcamera dependencies |
 | Python packages | picamera2, loguru, websockets, smbus2, opencv, numpy |
 | VEYE driver | Clones, compiles, and installs the V4L2 kernel module + device tree overlay |
+| Kernel pin | Holds the kernel packages so an upgrade cannot orphan the compiled driver |
 | systemd service | Installs and enables `picamstream.service` (via `install_service.sh`) |
+
+## Kernel Notes
+
+The VEYE/IMX462 driver is an out-of-tree kernel module. It is compiled against
+`/lib/modules/$(uname -r)/build` and installed into `/lib/modules/$(uname -r)/`,
+so it is valid **only for the exact kernel version it was built on**.
+
+Three consequences:
+
+1. **Headers must match the running kernel, flavour included.** Raspberry Pi OS
+   ships one flavour per model and bitness — a Pi Zero 2 W runs `v7` on 32-bit
+   and `v8` on 64-bit. `linux-headers-rpi-v8` is installable on 32-bit systems
+   too, so installing it on a `v7` kernel yields headers that can never match
+   `uname -r`. The script derives the flavour from `uname -r` and installs the
+   matching package.
+
+2. **The kernel must not be newer than VEYE's driver source.** The
+   [VEYE repo](https://github.com/veyeimaging/raspberrypi_v4l2) publishes one
+   source tree per kernel series (`rpi-6.1.y`, `rpi-6.6.y`, `rpi-6.12.y`, …).
+   Raspberry Pi OS Trixie now ships **6.18**, which VEYE has no source for yet.
+   The script falls back to the newest tree it can find and attempts the build
+   anyway — the `rpi-6.12.y` sources compile cleanly against 6.18.39 headers
+   (verified 2026-09, warnings only). If a future kernel does break the build,
+   run the Pi on a supported kernel instead: pin an older
+   `linux-image-rpi-<flavour>` from the archive, or flash Bookworm (6.12/6.6).
+
+3. **Kernel upgrades break the camera.** After a successful build the script
+   runs `apt-mark hold` on `linux-image-rpi-<flavour>` and
+   `linux-headers-rpi-<flavour>`. To take kernel updates again:
+
+   ```bash
+   sudo apt-mark unhold linux-image-rpi-v8 linux-headers-rpi-v8   # your flavour
+   sudo apt full-upgrade && sudo reboot
+   ./install.sh   # rebuild the driver for the new kernel
+   ```
+
+### Troubleshooting
+
+```bash
+uname -r                                  # running kernel + flavour
+ls -d /lib/modules/$(uname -r)/build      # headers present?
+ls /lib/modules/*/kernel/drivers/media/i2c/veyecam2m.ko   # driver installed for which kernel?
+dmesg | grep -i veye                      # driver probe messages
+v4l2-ctl --list-devices                   # camera detected?
+```
+
+If `/lib/modules/$(uname -r)/build` is missing, the kernel you booted has no
+headers installed — reboot into the newest kernel and re-run `install.sh`.
 
 ## systemd Service
 

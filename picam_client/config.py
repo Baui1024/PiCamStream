@@ -147,3 +147,28 @@ IR_LED_ENABLED = True
 # modulation back, and with it the constraint that the exposure must be a
 # whole number of PWM periods — see the README.
 IR_LED_DEFAULT_BRIGHTNESS = 0
+
+# =============================================================================
+# Light sensor polling and telemetry
+# =============================================================================
+
+# Set False on boards with no ambient light sensor fitted.
+LIGHT_SENSOR_ENABLED = True
+
+# Gap *between* sensor reads, not the resulting rate. A read blocks for one
+# integration period, which is up to ~0.7 s on the most sensitive rung, so in
+# near-darkness the effective rate bottoms out around one reading per 2.7 s.
+LIGHT_SENSOR_POLL_INTERVAL_S = 2.0
+
+# Backoff before reopening the bus after an I2C failure.
+LIGHT_SENSOR_RETRY_INTERVAL_S = 30.0
+
+# Lux our own IR illuminator adds to the sensor per 1% of brightness.
+# compute_lux() already subtracts a weighted ch1, so 940 nm cancels to first
+# order, but its coefficients are fitted for broadband illuminants and a
+# residual remains. Measure per enclosure — see the README calibration steps.
+LIGHT_SENSOR_IR_LUX_PER_PCT = 0.0
+
+# How often the camera pushes telemetry to the inference server. Matches the
+# server's own 2 s stats broadcast so nothing waits for the following tick.
+TELEMETRY_INTERVAL_S = 2.0

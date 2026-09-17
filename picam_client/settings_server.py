@@ -81,6 +81,38 @@ class SettingsServer:
             await self._server.wait_closed()
             logger.info("Settings server stopped")
 
+    async def broadcast(self, payload: dict) -> int:
+        """Send one JSON message to every connected client.
+
+        Returns the number of clients that accepted it. Never raises: a client
+        that has gone away is discarded rather than aborting the fan-out.
+        """
+        clients = tuple(self._clients)  # snapshot — _handle_client mutates the set
+        if not clients:
+            return 0
+
+        message = json.dumps(payload)
+        results = await asyncio.gather(
+            *[client.send(message) for client in clients],
+            return_exceptions=True,
+        )
+
+        delivered = 0
+        for client, result in zip(clients, results):
+            if isinstance(result, BaseException):
+                logger.debug(f"Settings broadcast failed, dropping client: {result}")
+                self._clients.discard(client)
+            else:
+                delivered += 1
+        return delivered
+
+    async def broadcast_settings(self) -> None:
+        """Push the current camera settings to every client."""
+        await self.broadcast({
+            "type": "settings",
+            "data": self._camera.get_settings(),
+        })
+
     async def _handle_client(self, websocket) -> None:
         """Handle a connected settings client."""
         self._clients.add(websocket)
@@ -121,31 +153,14 @@ class SettingsServer:
             elif msg_type == "set":
                 # Update settings
                 settings = data.get("data", {})
-                result = self._camera.update_settings(settings)
-                
-                # Broadcast updated settings to all clients
-                response = json.dumps({
-                    "type": "settings",
-                    "data": self._camera.get_settings(),
-                })
-                await asyncio.gather(
-                    *[client.send(response) for client in self._clients],
-                    return_exceptions=True,
-                )
-                
+                self._camera.update_settings(settings)
+                await self.broadcast_settings()
                 logger.info(f"Settings updated: {settings}")
 
             elif msg_type == "reset":
                 # Reset to config file defaults
                 self._camera.reset_settings()
-                response = json.dumps({
-                    "type": "settings",
-                    "data": self._camera.get_settings(),
-                })
-                await asyncio.gather(
-                    *[client.send(response) for client in self._clients],
-                    return_exceptions=True,
-                )
+                await self.broadcast_settings()
                 logger.info("Settings reset to defaults")
 
             else:

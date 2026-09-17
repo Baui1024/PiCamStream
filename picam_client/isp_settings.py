@@ -1,6 +1,7 @@
 """VEYE ISP control via I2C (smbus2) and settings persistence to JSON."""
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,14 @@ except ImportError:
     i2c_msg = None
 
 from .config import V4L2_I2C_BUS, V4L2_I2C_ADDR
+
+# Serialises ISP sessions across threads. Every session toggles the camera's
+# "enable I2C transfer" register (0x07) on enter and exit and leaves page/offset
+# state in the device between the writes of an indirect access, so two
+# overlapping sessions corrupt each other's reads. Nothing was concurrent until
+# background polling arrived; it is now, so this is load-bearing.
+# Reentrant so a session nested inside another on the same thread cannot deadlock.
+_I2C_LOCK = threading.RLock()
 
 # All ISP parameters we manage (persisted to JSON)
 ISP_PARAMS = [
@@ -125,10 +134,23 @@ class VeyeISPControl:
     def __enter__(self):
         if not _smbus_available:
             raise RuntimeError("smbus2 is not installed")
-        self._bus = SMBus(self._bus_num)
-        # Enable I2C transfer on the ISP
-        self._write_reg(0x07, 0xFE)
-        time.sleep(0.01)
+        # Held for the whole session — see _I2C_LOCK. Acquired before the bus is
+        # opened so a failure to open cannot leave the lock held.
+        _I2C_LOCK.acquire()
+        try:
+            self._bus = SMBus(self._bus_num)
+            # Enable I2C transfer on the ISP
+            self._write_reg(0x07, 0xFE)
+            time.sleep(0.01)
+        except BaseException:
+            if self._bus is not None:
+                try:
+                    self._bus.close()
+                except Exception:
+                    pass
+                self._bus = None
+            _I2C_LOCK.release()
+            raise
         return self
 
     def __exit__(self, *exc):
@@ -140,6 +162,7 @@ class VeyeISPControl:
         if self._bus:
             self._bus.close()
             self._bus = None
+        _I2C_LOCK.release()
 
     # -- low-level helpers --
 

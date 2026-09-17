@@ -21,6 +21,8 @@ from .config import (
     CAMERA_VFLIP,
     V4L2_DEVICE,
     V4L2_FORMAT,
+    IR_LED_ENABLED,
+    IR_LED_DEFAULT_BRIGHTNESS,
 )
 
 
@@ -385,12 +387,15 @@ class V4L2Backend(CameraBackend):
                 if 1 <= value <= 100:
                     self._jpeg_quality = value
 
-            # Update ISP params via I2C
-            for param, value in settings.items():
-                if param in isp_settings.ISP_PARAMS:
-                    isp_settings.update_param(
-                        self._isp_settings, param, str(value)
-                    )
+            # Update ISP params via I2C. Written as one batch so the ordering
+            # rules (mode before exposure) can be applied across the whole set.
+            isp_changes = {k: v for k, v in settings.items()
+                           if k in isp_settings.ISP_PARAMS}
+            if isp_changes:
+                results = isp_settings.update_params(self._isp_settings, isp_changes)
+                failed = [p for p, ok in results.items() if not ok]
+                if failed:
+                    logger.warning(f"ISP params rejected by the camera: {failed}")
 
         return self.get_settings()
 
@@ -431,11 +436,17 @@ class V4L2Backend(CameraBackend):
 
 
 class Camera:
-    """Camera facade that delegates to the configured backend."""
+    """Camera facade that delegates to the configured backend.
+
+    Also owns the IR illuminator: it is not a camera setting as such, but it
+    is part of the same nightvision assembly and rides the same settings
+    channel, so callers get one place to control the whole imaging chain.
+    """
 
     def __init__(self):
         self._buffer = FrameBuffer()
         self._backend: Optional[CameraBackend] = None
+        self._illuminator = None  # Optional[IRIlluminator]
 
     def start(self) -> None:
         """Initialize the configured camera backend and begin capturing."""
@@ -445,9 +456,28 @@ class Camera:
             self._backend = PicamBackend(self._buffer)
 
         self._backend.start()
+        self._start_illuminator()
+
+    def _start_illuminator(self) -> None:
+        """Bring up the IR illuminator. Never fatal — the camera still works."""
+        if not IR_LED_ENABLED:
+            logger.info("IR illuminator disabled in config")
+            return
+
+        from . import ir_leds
+
+        try:
+            self._illuminator = ir_leds.IRIlluminator().open()
+            self._illuminator.set_brightness(ir_leds.load_brightness())
+        except Exception as e:
+            self._illuminator = None
+            logger.warning(f"IR illuminator unavailable: {e}")
 
     def stop(self) -> None:
         """Stop camera capture and release resources."""
+        if self._illuminator:
+            self._illuminator.close()
+            self._illuminator = None
         if self._backend:
             self._backend.stop()
             self._backend = None
@@ -460,18 +490,35 @@ class Camera:
 
     def get_settings(self) -> dict[str, Any]:
         """Get current runtime settings."""
-        if self._backend:
-            return self._backend.get_settings()
-        return {}
+        settings = self._backend.get_settings() if self._backend else {}
+        if self._illuminator:
+            settings["ir_brightness"] = self._illuminator.brightness
+        return settings
 
     def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Update runtime settings."""
+        if "ir_brightness" in settings:
+            self._set_ir_brightness(settings["ir_brightness"])
         if self._backend:
-            return self._backend.update_settings(settings)
-        return {}
+            self._backend.update_settings(settings)
+        return self.get_settings()
 
     def reset_settings(self) -> dict[str, Any]:
         """Reset all settings to config file defaults."""
+        if self._illuminator:
+            self._set_ir_brightness(IR_LED_DEFAULT_BRIGHTNESS)
         if self._backend:
-            return self._backend.reset_settings()
-        return {}
+            self._backend.reset_settings()
+        return self.get_settings()
+
+    def _set_ir_brightness(self, value: Any) -> None:
+        """Apply and persist an IR brightness request, tolerating bad input."""
+        if not self._illuminator:
+            logger.warning("IR brightness requested but the illuminator is unavailable")
+            return
+        try:
+            self._illuminator.set_brightness(float(value), persist=True)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Ignoring invalid ir_brightness {value!r}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to set IR brightness: {e}")

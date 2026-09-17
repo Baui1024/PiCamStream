@@ -302,6 +302,37 @@ fi
 # VEYE I2C control tools no longer needed at runtime (smbus2 replaces them)
 # but keep the repo around for manual debugging with veye_mipi_i2c.sh
 
+# =============================================================================
+# IR illuminator PWM (GPIO12 -> AL8860 CTRL)
+# =============================================================================
+
+# Route GPIO12 to PWM0 (ALT0). Verify after reboot with "pinctrl get 12" -> a0.
+if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=pwm,pin=12" "$CONFIG_TXT"; then
+    echo "dtoverlay=pwm,pin=12,func=4" | sudo tee -a "$CONFIG_TXT"
+fi
+
+# Sysfs PWM is root-only by default. Hand /sys/class/pwm to the gpio group so
+# picamstream can dim the illuminator without running privileged —
+# install_service.sh already puts the service user in that group.
+PWM_RULES="/etc/udev/rules.d/99-picamstream-pwm.rules"
+if [ ! -f "$PWM_RULES" ]; then
+    sudo tee "$PWM_RULES" > /dev/null <<'EOF'
+# Give the gpio group access to sysfs PWM so PiCamStream can drive the IR LEDs.
+SUBSYSTEM=="pwm*", PROGRAM="/bin/sh -c '\
+    chown -R root:gpio /sys/class/pwm && chmod -R 770 /sys/class/pwm ; \
+    chown -R root:gpio /sys/devices/platform/soc/*.pwm/pwm/pwmchip* && \
+    chmod -R 770 /sys/devices/platform/soc/*.pwm/pwm/pwmchip* \
+'"
+EOF
+    sudo udevadm control --reload-rules || true
+    echo "Installed udev rule for sysfs PWM access: $PWM_RULES"
+fi
+
+if ! getent group gpio > /dev/null 2>&1; then
+    echo "WARNING: no 'gpio' group on this system — the IR LED PWM udev rule"
+    echo "         will not grant access. Create the group and add $USER to it."
+fi
+
 # Disable onboard WiFi if using USB WiFi
 if [[ "$USE_USB_WIFI" =~ ^[Yy] ]]; then
     if [ -n "$CONFIG_TXT" ] && ! grep -q "^dtoverlay=disable-wifi" "$CONFIG_TXT"; then

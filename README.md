@@ -70,6 +70,7 @@ python main.py
 | picamera2 | Installs libcamera dependencies |
 | Python packages | picamera2, loguru, websockets, smbus2, opencv, numpy |
 | VEYE driver | Clones, compiles, and installs the V4L2 kernel module + device tree overlay |
+| IR illuminator | Enables PWM0 on GPIO12 and a udev rule for non-root `/sys/class/pwm` access |
 | Kernel pin | Holds the kernel packages so an upgrade cannot orphan the compiled driver |
 | systemd service | Installs and enables `picamstream.service` (via `install_service.sh`) |
 
@@ -235,7 +236,100 @@ adjustments without restarting the service:
 ISP parameters (VEYE backend): `daynightmode`, `mshutter`, `agc`, `denoise`,
 `brightness`, `contrast`, `saturation`, `sharppen`, `wdrmode`, `lowlight`, `wbmode`.
 
-Changes are persisted to `isp_settings.json` and reapplied on startup.
+`ir_brightness` (0–100) drives the IR illuminator on the same channel:
+
+```json
+{"type": "set", "data": {"ir_brightness": 60}}
+```
+
+Changes are persisted to `isp_settings.json` (ISP) and `ir_settings.json`
+(illuminator) and reapplied on startup.
+
+## IR Illuminator
+
+Four 940 nm SFH 4726BS LEDs in series, driven by an AL8860 hysteretic buck
+whose CTRL pin is dimmed by PWM0 on GPIO12. `install.sh` adds
+`dtoverlay=pwm,pin=12,func=4` and a udev rule that gives the `gpio` group
+access to `/sys/class/pwm`, so the service dims the LEDs without running as
+root.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `IR_LED_ENABLED` | `True` | Set `False` on boards with no illuminator fitted |
+| `IR_PWM_CHIP` | `"pwmchip0"` | Falls back to whatever chip exists if this one doesn't |
+| `IR_PWM_CHANNEL` | `0` | |
+| `IR_PWM_PERIOD_NS` | `2_000_000` | 500 Hz. The AL8860 needs < 500 Hz — never go shorter |
+| `IR_LED_SENSE_RESISTOR_OHM` | `1.0` | **Must match the fitted part, see below** |
+| `IR_LED_MAX_DUTY_PCT` | `100` | Duty ceiling; brightness 0–100 is scaled into it |
+| `IR_LED_DEFAULT_BRIGHTNESS` | `0` | Used until something is persisted |
+
+**Sense resistor.** `I_OUT_NOM = 0.1 / Rs` sets full-scale LED current, and
+the two config values above must match the board:
+
+| Rs | Full-duty current | Full-duty power | `IR_LED_MAX_DUTY_PCT` |
+|---|---|---|---|
+| 1.0 Ω | 100 mA | ~1 W | `100` |
+| 0.13 Ω (original) | 760 mA | ~12 W — over the 10 W budget | `13` |
+
+Running the 1 Ω config on a board still fitted with 0.13 Ω would allow ~12 W
+and an unverified LED solder-point temperature (junction max 145 °C, Rth(j-sp)
+1.6–1.9 K/W). The illuminator logs its ceiling on startup, so check the
+journal after swapping boards:
+
+```
+IR illuminator ready on pwmchip0/pwm0: 500 Hz, Rs=1 ohm (100 mA at full duty),
+capped at 100% duty = 100 mA
+```
+
+The AL8860 is only specified as linear from 1% duty, so requests below that
+are reported and driven as off. With the cap at 100 the whole 1–100 range is
+usable; a lower cap raises that floor proportionally (a 50% cap makes 2% the
+minimum).
+
+### Banding and shutter speed
+
+**Short version: run the illuminator at 100% and there is no banding at any
+shutter speed.** At full duty the CTRL pin is held high, the LED current is
+constant, and there is nothing for the rolling shutter to beat against —
+verified banding-free down to 1/120 s. Size the sense resistor so the
+brightness you want falls at or near full duty and this whole section stops
+mattering.
+
+The rest applies when dimming below 100%.
+
+The illuminator is PWM-dimmed and the sensor has a rolling shutter, so rows
+integrate over different time windows. Unless the exposure is a whole number
+of PWM periods, rows collect different amounts of light and the image shows
+horizontal stripes — worse at higher IR output, because AE shortens the
+shutter as the scene brightens.
+
+At 500 Hz (2 ms period) in **PAL**, these are exact and stripe-free:
+
+| `mshutter` | PAL exposure | PWM periods |
+|---|---|---|
+| `0x41` | 1/25 s (40 ms) | 20 |
+| `0x42` | 1/50 s (20 ms) | 10 |
+| `0x43` | 1/100 s (10 ms) | 5 |
+
+NTSC has no exact match at 500 Hz (1/30 s = 16.67 periods), which is why
+stripes there also *roll* — 500/30 is not an integer, so the pattern shifts
+every frame. Use PAL, or move the PWM to 240 Hz for the NTSC family.
+
+A faint residual remains even at exact multiples: the sensor and the Pi run on
+independent clocks, so the exposure is only exact to a few hundred ppm. The
+relative ripple is roughly `clock_error / duty_cycle` — independent of PWM
+frequency and exposure time, so raising the PWM frequency does not help. Only
+a higher duty cycle does, which is why the sense resistor is sized for the
+brightness actually needed rather than dimming hard from a much larger
+full-scale current.
+
+Manual control without the service:
+
+```bash
+python -m picam_client.ir_leds 40     # 40%, holds until Ctrl-C
+python -m picam_client.ir_leds        # ramp 0 -> 100 -> 0
+pinctrl get 12                        # should report a0
+```
 
 ## Project Structure
 
@@ -247,8 +341,10 @@ PiCamStream/
 ├── pyproject.toml           # Python project metadata & dependencies
 └── picam_client/
     ├── config.py            # All configuration constants
-    ├── capture.py           # Camera backends (PicamBackend, V4L2Backend)
+    ├── capture.py           # Camera backends (PicamBackend, V4L2Backend) + illuminator
     ├── stream.py            # TCP/TLS frame streaming server
     ├── settings_server.py   # WebSocket server for runtime settings
-    └── isp_settings.py      # VEYE ISP parameter persistence (I2C)
+    ├── isp_settings.py      # VEYE ISP parameter persistence (I2C)
+    ├── light_sensor.py      # TSL27721 ambient light sensor (I2C)
+    └── ir_leds.py           # IR illuminator PWM dimming (AL8860 on GPIO12)
 ```

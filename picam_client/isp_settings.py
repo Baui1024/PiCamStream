@@ -48,6 +48,31 @@ ISP_PARAMS = [
 # Read-only params (queried but never written back on apply)
 _READ_ONLY_PARAMS = {"awbgain_rgain", "awbgain_bgain"}
 
+# Write ordering matters. The ISP reinitialises its auto-exposure pipeline when
+# the video format or an imaging mode changes, discarding any shutter/gain
+# values written beforehand. Mode params must therefore go first and exposure
+# params last — both at startup and on every runtime change. Writing them the
+# other way round leaves the camera on whatever shutter the mode switch picked,
+# while the register still reads back the value that was asked for.
+_MODE_PARAMS = frozenset({
+    "videoformat", "cameramode", "wdrmode", "daynightmode", "nodf", "lowlight",
+})
+_AE_PARAMS = ("mshutter", "agc", "aespeed_agc", "aespeed_shutter")
+
+
+def _write_rank(param: str) -> int:
+    if param in _MODE_PARAMS:
+        return 0
+    if param in _AE_PARAMS:
+        return 2
+    return 1
+
+
+def apply_order(params) -> list[str]:
+    """Order params so mode switches are written before exposure settings."""
+    known = [p for p in params if p in ISP_PARAMS and p not in _READ_ONLY_PARAMS]
+    return sorted(known, key=lambda p: (_write_rank(p), ISP_PARAMS.index(p)))
+
 SETTINGS_FILE = Path(__file__).parent.parent / "isp_settings.json"
 
 # Simple indirect register map: param → (page, offset)
@@ -273,11 +298,10 @@ def query_camera() -> dict[str, str]:
 
 
 def apply_settings(settings: dict[str, str]) -> None:
-    """Write all settings to the camera."""
+    """Write all settings to the camera, mode params before exposure params."""
     with VeyeISPControl() as isp:
-        for param, hex_val in settings.items():
-            if param not in ISP_PARAMS or param in _READ_ONLY_PARAMS:
-                continue
+        for param in apply_order(settings):
+            hex_val = settings[param]
             try:
                 isp.write(param, _from_hex(hex_val))
                 logger.debug(f"Applied {param} = {hex_val}")
@@ -313,18 +337,59 @@ def save(settings: dict[str, str], path: Path = SETTINGS_FILE) -> None:
         logger.error(f"Failed to save {path}: {e}")
 
 
+def update_params(settings: dict[str, str], changes: dict[str, str],
+                  path: Path = SETTINGS_FILE) -> dict[str, bool]:
+    """Write several ISP params in one I2C session and persist them.
+
+    Returns {param: succeeded}. Params the camera does not support are
+    reported as failures rather than silently skipped.
+
+    If a mode param changes, the exposure params are rewritten afterwards:
+    the ISP drops shutter/gain when it switches mode, so without this a
+    day/night toggle silently reverts the shutter.
+    """
+    results: dict[str, bool] = {}
+    writable = {}
+    for param, value in changes.items():
+        if param in ISP_PARAMS and param not in _READ_ONLY_PARAMS:
+            writable[param] = str(value)
+        else:
+            logger.warning(f"Unknown or read-only ISP param: {param}")
+            results[param] = False
+
+    if not writable:
+        return results
+
+    to_write = dict(writable)
+    if any(p in _MODE_PARAMS for p in writable):
+        for param in _AE_PARAMS:
+            if param not in to_write and param in settings:
+                to_write[param] = settings[param]
+        logger.debug("Mode param changed — reapplying exposure settings after it")
+
+    try:
+        with VeyeISPControl() as isp:
+            for param in apply_order(to_write):
+                hex_val = to_write[param]
+                try:
+                    isp.write(param, _from_hex(hex_val))
+                    if param in writable:
+                        settings[param] = hex_val
+                        results[param] = True
+                except Exception as e:
+                    logger.error(f"Failed to update {param} = {hex_val}: {e}")
+                    if param in writable:
+                        results[param] = False
+    except Exception as e:
+        logger.error(f"ISP session failed, no settings applied: {e}")
+        return {p: False for p in changes}
+
+    if any(results.get(p) for p in writable):
+        save(settings, path)
+    return results
+
+
 def update_param(settings: dict[str, str], param: str, hex_val: str,
                  path: Path = SETTINGS_FILE) -> bool:
     """Update one ISP param: write to camera via I2C and persist to JSON."""
-    if param not in ISP_PARAMS:
-        logger.warning(f"Unknown or read-only ISP param: {param}")
-        return False
-    try:
-        with VeyeISPControl() as isp:
-            isp.write(param, _from_hex(hex_val))
-        settings[param] = hex_val
-        save(settings, path)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to update {param}: {e}")
-        return False
+    return update_params(settings, {param: hex_val}, path).get(param, False)

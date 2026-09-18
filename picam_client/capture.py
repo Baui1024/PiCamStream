@@ -410,6 +410,25 @@ class V4L2Backend(CameraBackend):
 
         return self.get_settings()
 
+    def get_isp_value(self, param: str) -> Optional[int]:
+        """Cached ISP register value as an int, or None if unknown."""
+        with self._settings_lock:
+            raw = self._isp_settings.get(param)
+        try:
+            return int(raw, 16) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def apply_isp(self, changes: dict[str, str]) -> dict[str, bool]:
+        """Write ISP params and update the cache.
+
+        Blocking — hundreds of milliseconds of I2C. Call from an executor.
+        """
+        from . import isp_settings
+
+        with self._settings_lock:
+            return isp_settings.update_params(self._isp_settings, changes)
+
     def stop(self) -> None:
         """Stop GStreamer pipeline and release resources."""
         self._running = False
@@ -447,6 +466,16 @@ class Camera:
         self._buffer = FrameBuffer()
         self._backend: Optional[CameraBackend] = None
         self._illuminator = None  # Optional[IRIlluminator]
+        self._ir_auto = None  # Optional[IRDayNightController]
+
+    @property
+    def illuminator(self):
+        """The IR illuminator, or None if it failed to initialise."""
+        return self._illuminator
+
+    def attach_ir_auto(self, controller) -> None:
+        """Register the day/night controller so settings messages reach it."""
+        self._ir_auto = controller
 
     def start(self) -> None:
         """Initialize the configured camera backend and begin capturing."""
@@ -493,15 +522,35 @@ class Camera:
         settings = self._backend.get_settings() if self._backend else {}
         if self._illuminator:
             settings["ir_brightness"] = self._illuminator.brightness
+        if self._ir_auto:
+            settings["ir_mode"] = self._ir_auto.mode
         return settings
 
     def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Update runtime settings."""
         if "ir_brightness" in settings:
             self._set_ir_brightness(settings["ir_brightness"])
+        # Applied after brightness, so {"ir_brightness": 60, "ir_mode": "auto"}
+        # means "set 60 now, then hand control back" rather than the reverse.
+        if "ir_mode" in settings and self._ir_auto:
+            self._ir_auto.set_mode(settings["ir_mode"])
         if self._backend:
             self._backend.update_settings(settings)
         return self.get_settings()
+
+    def get_isp_value(self, param: str) -> Optional[int]:
+        """Cached ISP register value as an int, or None if not available."""
+        if self._backend is None:
+            return None
+        getter = getattr(self._backend, "get_isp_value", None)
+        return getter(param) if getter else None
+
+    def apply_isp(self, changes: dict[str, str]) -> dict[str, bool]:
+        """Write ISP params. Blocking I2C — call from an executor."""
+        if self._backend is None:
+            return {}
+        applier = getattr(self._backend, "apply_isp", None)
+        return applier(changes) if applier else {}
 
     def reset_settings(self) -> dict[str, Any]:
         """Reset all settings to config file defaults."""
@@ -517,8 +566,15 @@ class Camera:
             logger.warning("IR brightness requested but the illuminator is unavailable")
             return
         try:
-            self._illuminator.set_brightness(float(value), persist=True)
+            pct = float(value)
         except (TypeError, ValueError) as e:
             logger.warning(f"Ignoring invalid ir_brightness {value!r}: {e}")
+            return
+        try:
+            self._illuminator.set_brightness(pct, persist=True)
         except Exception as e:
             logger.error(f"Failed to set IR brightness: {e}")
+            return
+        # A brightness arriving from the UI means "stop deciding for me".
+        if self._ir_auto:
+            self._ir_auto.note_manual_brightness(pct)

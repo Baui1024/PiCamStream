@@ -39,6 +39,7 @@ from .config import (
     IR_LED_MAX_DUTY_PCT,
     IR_LED_DEFAULT_BRIGHTNESS,
     IR_LED_SENSE_RESISTOR_OHM,
+    IR_AUTO_DEFAULT_MODE,
 )
 
 _SYSFS_ROOT = Path("/sys/class/pwm")
@@ -354,26 +355,50 @@ class IRIlluminator:
         )
 
 
-def load_brightness(path: Path = SETTINGS_FILE) -> float:
-    """Last persisted brightness, or the config default if there is none."""
+def load_settings(path: Path = SETTINGS_FILE) -> dict:
+    """Persisted IR state, falling back to config defaults. Never raises.
+
+    Tolerates the older single-key file: missing keys just take their default.
+    """
+    settings = {
+        "brightness_pct": float(IR_LED_DEFAULT_BRIGHTNESS),
+        "mode": IR_AUTO_DEFAULT_MODE,
+    }
     if path.exists():
         try:
             with open(path) as f:
-                value = float(json.load(f)["brightness_pct"])
-            return min(100.0, max(0.0, value))
+                stored = json.load(f)
+            if "brightness_pct" in stored:
+                settings["brightness_pct"] = min(
+                    100.0, max(0.0, float(stored["brightness_pct"])))
+            if stored.get("mode") in ("auto", "manual"):
+                settings["mode"] = stored["mode"]
         except Exception as e:
             logger.error(f"Failed to load {path}: {e}")
-    return float(IR_LED_DEFAULT_BRIGHTNESS)
+    return settings
+
+
+def save_settings(path: Path = SETTINGS_FILE, **fields) -> None:
+    """Merge fields into the persisted state. Failures only log."""
+    settings = load_settings(path)
+    settings.update(fields)
+    try:
+        with open(path, "w") as f:
+            json.dump({"brightness_pct": round(float(settings["brightness_pct"]), 1),
+                       "mode": settings["mode"]}, f, indent=2)
+        logger.debug(f"Saved IR settings to {path}")
+    except Exception as e:
+        logger.error(f"Failed to save {path}: {e}")
+
+
+def load_brightness(path: Path = SETTINGS_FILE) -> float:
+    """Last persisted brightness, or the config default if there is none."""
+    return load_settings(path)["brightness_pct"]
 
 
 def save_brightness(pct: float, path: Path = SETTINGS_FILE) -> None:
     """Persist brightness so it survives a service restart."""
-    try:
-        with open(path, "w") as f:
-            json.dump({"brightness_pct": round(pct, 1)}, f, indent=2)
-        logger.debug(f"Saved IR brightness to {path}")
-    except Exception as e:
-        logger.error(f"Failed to save {path}: {e}")
+    save_settings(path, brightness_pct=pct)
 
 
 if __name__ == "__main__":

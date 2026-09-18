@@ -16,6 +16,7 @@ from picam_client.stream import StreamServer
 from picam_client.settings_server import SettingsServer
 from picam_client.light_monitor import LightMonitor
 from picam_client.telemetry import TelemetryHub
+from picam_client.ir_auto import IRDayNightController
 from picam_client.config import (
     LOG_LEVEL,
     TLS_ENABLED,
@@ -23,6 +24,7 @@ from picam_client.config import (
     STREAM_PORT,
     SETTINGS_WS_PORT,
     LIGHT_SENSOR_ENABLED,
+    IR_AUTO_ENABLED,
 )
 
 # Configure loguru
@@ -57,8 +59,16 @@ async def main() -> None:
     if LIGHT_SENSOR_ENABLED:
         await light.start()
 
+    ir_auto = IRDayNightController(camera, light, executor=i2c_pool)
+    if IR_AUTO_ENABLED:
+        camera.attach_ir_auto(ir_auto)
+        light.ir_brightness_source = ir_auto.current_brightness
+        await ir_auto.start()
+
     telemetry = TelemetryHub(settings_server)
     telemetry.register("light", light.snapshot)
+    if IR_AUTO_ENABLED:
+        telemetry.register("ir", ir_auto.snapshot)
 
     # Graceful shutdown
     loop = asyncio.get_event_loop()
@@ -89,6 +99,8 @@ async def main() -> None:
         task.cancel()
     await asyncio.gather(broadcast_task, telemetry_task, return_exceptions=True)
 
+    # Must stop before camera.stop(), which closes the PWM channel it writes to.
+    await ir_auto.stop()
     await light.stop()
     await settings_server.stop()
     await server.stop()

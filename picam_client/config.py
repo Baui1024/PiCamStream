@@ -172,3 +172,81 @@ LIGHT_SENSOR_IR_LUX_PER_PCT = 0.0
 # How often the camera pushes telemetry to the inference server. Matches the
 # server's own 2 s stats broadcast so nothing waits for the following tick.
 TELEMETRY_INTERVAL_S = 2.0
+
+# =============================================================================
+# Automatic day/night switching
+# =============================================================================
+
+# Master switch for the automatic IR controller.
+IR_AUTO_ENABLED = True
+
+# Mode used before anything has been persisted: "auto" or "manual".
+IR_AUTO_DEFAULT_MODE = "auto"
+
+# How often the phase is re-evaluated. No I2C happens except on a transition,
+# so this is nearly free; 5 s gives the debounce below 12 samples of margin.
+IR_AUTO_INTERVAL_S = 5.0
+
+# Lux thresholds. The controller is deliberately binary — IR is either off or
+# full — so these only decide *when* to switch, never how bright.
+#
+# Enter night below this. Roughly the end of civil twilight, where a
+# visible-light image stops being usable.
+IR_AUTO_NIGHT_LUX = 3.0
+
+# Leave night above this, with the illuminator off. 5x hysteresis against
+# NIGHT_LUX so dusk does not flap.
+IR_AUTO_DAY_LUX = 15.0
+
+# Leave night above this while the illuminator is lit. Much higher, because
+# our own IR inflates the reading: any residual would have to be four times
+# larger than expected to fake a sunrise.
+IR_AUTO_DAY_LUX_WITH_IR = 60.0
+
+# Hard interlock: never declare day while ch1/ch0 says the light is
+# IR-dominant. Daylight sits around 0.2-0.5; our 940 nm LEDs have almost no
+# visible component and push the ratio toward 1. This closes the
+# self-illumination feedback path regardless of how well the lux compensation
+# above is calibrated, which is why it is the primary defence and not the
+# coefficient. Cost: a halogen lamp can reach ~0.8 and would keep the LEDs on
+# needlessly, wasting about a watt. A false "day" at night blinds the camera,
+# so the asymmetry points the right way.
+IR_AUTO_DAY_MAX_IR_RATIO = 0.9
+
+# How long a threshold crossing must hold before it takes effect.
+#
+# Asymmetric on purpose. Being slow to switch INTO night leaves the camera
+# blind, so that direction is quick. Being slow to switch into day only wastes
+# about a watt, so that direction is slow enough to reject headlights, torches
+# and security lights sweeping past.
+IR_AUTO_NIGHT_DEBOUNCE_S = 15.0
+IR_AUTO_PHASE_DEBOUNCE_S = 60.0
+
+# A light reading older than this is not usable; the phase becomes "unknown".
+IR_AUTO_LUX_MAX_AGE_S = 30.0
+
+# No reading at all this long after start -> fail safe. Short, because
+# nothing has been committed yet.
+IR_AUTO_STARTUP_GRACE_S = 60.0
+
+# Reading lost after the controller has been running -> hold this long before
+# failing safe. Much longer than the startup grace: the camera is working and
+# lit, so a transient I2C hiccup must not blind it.
+IR_AUTO_UNKNOWN_HOLD_S = 900.0
+
+# Where to go when a hold expires. Off: LEDs stuck on in daylight is the only
+# actively wasteful end state.
+IR_AUTO_FAILSAFE_PCT = 0.0
+
+# Switch daynightmode (colour <-> B&W, which also moves the IR-cut filter)
+# along with the illuminator. Auto-disabled if the ISP is set to drive the
+# filter from its own trigger pin (daynightmode 0xfc).
+IR_AUTO_MANAGE_DAYNIGHT = True
+
+# Cap auto-exposure at night to bound motion blur on walking people.
+# Defaults OFF: on a close-range scene the illuminator is strong enough that
+# AE never approaches the ceiling anyway, so this does nothing until the
+# camera is looking at something far enough away to need it. Turn it on once
+# you have seen the real installed scene.
+IR_AUTO_MANAGE_SHUTTER_CAP = False
+IR_AUTO_NIGHT_SHUTTER_MAX_US = 10000

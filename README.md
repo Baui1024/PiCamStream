@@ -323,6 +323,63 @@ a higher duty cycle does, which is why the sense resistor is sized for the
 brightness actually needed rather than dimming hard from a much larger
 full-scale current.
 
+### Automatic day/night switching
+
+`ir_auto.py` switches the illuminator on ambient light from the TSL27721. It
+is deliberately **binary** — brightness is only ever 0 or 100, never anything
+between — because at both endpoints the PWM pin is static and banding is
+impossible at any shutter speed. Image brightness is the camera's
+auto-exposure's job.
+
+On the night transition it sets the illuminator to 100% and `daynightmode` to
+`0xfe` (B&W, which also moves the IR-cut filter); on the day transition, 0%
+and `0xff`.
+
+Three things keep it stable, and the first matters most:
+
+1. **IR-ratio interlock.** Our own 940 nm light would otherwise inflate the
+   lux reading, declare day, switch the LEDs off, read dark again and
+   oscillate. Daylight has `ch1/ch0` around 0.2-0.5; our LEDs push it toward
+   1. Refusing to declare day above `IR_AUTO_DAY_MAX_IR_RATIO` closes that
+   loop regardless of how well the lux compensation is calibrated.
+2. **Hysteresis**, with a higher day threshold while the LEDs are lit.
+3. **Asymmetric debounce** — quick into night (a blind camera is the worse
+   failure), slow into day (rejects headlights and security lights).
+
+Losing the light sensor makes it *hold*, not switch: turning off would blind
+the camera on a night-time I2C hiccup, turning on would light the LEDs all day
+if the sensor dies at noon. After `IR_AUTO_UNKNOWN_HOLD_S` it fails safe to
+off, and relights automatically when readings return.
+
+Setting `ir_brightness` from the web UI switches the mode to manual and pauses
+automatic switching; `ir_mode` back to `auto` resumes it and applies
+immediately.
+
+### Telemetry
+
+The camera pushes `{"type": "telemetry"}` on the settings WebSocket every
+`TELEMETRY_INTERVAL_S`, carrying the light reading and IR state. The TCP frame
+protocol is untouched. The inference server caches it per camera and shows it
+in the hardware settings panel; it also drives the optional per-zone
+"only when dark" condition.
+
+### IR compensation calibration
+
+`compute_lux()` already subtracts a weighted IR channel, so 940 nm cancels to
+first order — but those coefficients are fitted for broadband light, not a
+monochromatic LED, so a residual remains. To measure it:
+
+1. Dark room, enclosure assembled **as deployed**, camera aimed at the real
+   scene. The sensor mostly sees *reflected* IR, so an empty black room
+   understates it; a wall at 2-3 m is representative.
+2. Stop the service. Record lux and `ir_ratio` at brightness 0, 20, 40, 60,
+   80, 100, waiting ~5 s at each for the auto-range ladder to settle.
+3. Fit a line through (percent, lux − lux₀); the slope is
+   `LIGHT_SENSOR_IR_LUX_PER_PCT`.
+4. If the residual at 100% is more than a few lux, an LED has line of sight to
+   the sensor. Fix that with a baffle, not a coefficient — the reflected
+   component varies with the scene and cannot be calibrated away.
+
 Manual control without the service:
 
 ```bash
@@ -345,6 +402,9 @@ PiCamStream/
     ├── stream.py            # TCP/TLS frame streaming server
     ├── settings_server.py   # WebSocket server for runtime settings
     ├── isp_settings.py      # VEYE ISP parameter persistence (I2C)
-    ├── light_sensor.py      # TSL27721 ambient light sensor (I2C)
+    ├── light_sensor.py      # TSL27721 ambient light sensor driver (I2C)
+    ├── light_monitor.py     # Background sensor polling + caching
+    ├── telemetry.py         # Periodic telemetry push to the inference server
+    ├── ir_auto.py           # Automatic day/night switching
     └── ir_leds.py           # IR illuminator PWM dimming (AL8860 on GPIO12)
 ```
